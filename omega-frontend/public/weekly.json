@@ -1,0 +1,159 @@
+{
+  "week_label": "Week 4 (Jan 19 - Jan 25)",
+  "programs": [
+    {
+      "program_id": "prog-001",
+      "title": "In Touch with Dr. Charles Stanley",
+      "client_id": "intouch",
+      "air_date": "2026-01-23",
+      "thumbnail": "/thumbs/intouch.jpg",
+      "tracks": {
+        "is": {
+          "track_id": "t-101",
+          "status": "APPROVED",
+          "status_label": "Approved",
+          "outputs_total": 2,
+          "outputs_ready": 2,
+          "has_error": false,
+          "outputs": [
+            {
+              "type": "Classic Box",
+              "filename": "InTouch_W42_IS_Classic.mp4",
+              "status": "READY",
+              "size": "4.2 GB",
+              "url": "#"
+            },
+            {
+              "type": "Web Proxy",
+              "filename": "InTouch_W42_IS_Web.mp4",
+              "status": "READY",
+              "size": "450 MB",
+              "url": "#"
+            }
+          ]
+        },
+        "es": {
+          "track_id": "t-102",
+          "status": "REVIEWING",
+          "status_label": "Reviewing",
+          "outputs_total": 2,
+          "outputs_ready": 0,
+          "has_error": false,
+          "outputs": [
+            {
+              "type": "Classic Box",
+              "filename": "InTouch_W42_ES_Classic.mp4",
+              "status": "PENDING",
+              "size": "--",
+              "url": ""
+            }
+          ]
+        },
+        "de": {
+          "status": "MISSING",
+          "status_label": "--"
+        }
+      }
+    },
+    {
+      "program_id": "prog-002",
+      "title": "Turning Point",
+      "client_id": "turningpoint",
+      "air_date": "2026-01-22",
+      "thumbnail": "/thumbs/tp.jpg",
+      "tracks": {
+        "is": {
+          "track_id": "t-201",
+          "status": "BURNING",
+          "status_label": "Burning",
+          "outputs_total": 3,
+          "outputs_ready": 0,
+          "has_error": false,
+          "outputs": [
+            {
+              "type": "Classic Box",
+              "filename": "TP_W42_IS_Classic.mp4",
+              "status": "BURNING",
+              "size": "--",
+              "url": ""
+            },
+            {
+              "type": "Apple Pro",
+              "filename": "TP_W42_IS_Pro.mp4",
+              "status": "QUEUED",
+              "size": "--",
+              "url": ""
+            },
+            {
+              "type": "Web Proxy",
+              "filename": "TP_W42_IS_Web.mp4",
+              "status": "READY",
+              "size": "320 MB",
+              "url": "#"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "program_id": "prog-003",
+      "title": "Joyce Meyer",
+      "client_id": "joyce",
+      "air_date": "2026-01-21",
+      "tracks": {
+        "is": {
+          "track_id": "t-301",
+          "status": "COMPLETED",
+          "status_label": "Done",
+          "outputs_total": 1,
+          "outputs_ready": 1,
+          "has_error": false,
+          "outputs": [
+            {
+              "type": "Classic Box",
+              "filename": "JM_W42_IS_Classic.mp4",
+              "status": "READY",
+              "size": "2.1 GB",
+              "url": "#"
+            }
+          ]
+        },
+        "es": {
+          "track_id": "t-302",
+          "status": "ERROR",
+          "status_label": "Error",
+          "outputs_total": 1,
+          "outputs_ready": 0,
+          "has_error": true,
+          "outputs": [
+            {
+              "type": "Classic Box",
+              "filename": "JM_W42_ES_Classic.mp4",
+              "status": "FAILED",
+              "size": "--",
+              "url": "",
+              "error_msg": "Encoding Timeout (Error 504)"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "program_id": "prog-004",
+      "title": "Omega News",
+      "client_id": "omega",
+      "air_date": "Daily",
+      "tracks": {
+        "is": {
+          "track_id": "t-401",
+          "status": "TRANSCRIBED",
+          "status_label": "Transcribed",
+          "outputs_total": 0,
+          "outputs_ready": 0,
+          "has_error": false,
+          "outputs": []
+        }
+      }
+    }
+  ]
+}

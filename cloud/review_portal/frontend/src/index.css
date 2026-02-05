@@ -1,0 +1,32 @@
+@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Newsreader:wght@400;600;700&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --review-bg-1: #0a0a0a;
+  --review-bg-2: #0f0f0f;
+  --review-glow: rgba(74, 222, 128, 0.08);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background-color: var(--review-bg-1);
+  background-image:
+    radial-gradient(900px 500px at 15% 10%, rgba(74, 222, 128, 0.08), transparent 60%),
+    radial-gradient(700px 500px at 85% 80%, rgba(251, 191, 36, 0.08), transparent 65%),
+    linear-gradient(180deg, #0a0a0a 0%, #0b0b0b 50%, var(--review-bg-2) 100%);
+  color: #ffffff;
+  font-family: "Space Grotesk", "Noto Sans", sans-serif;
+  text-rendering: optimizeLegibility;
+}
+
+#root {
+  min-height: 100vh;
+}

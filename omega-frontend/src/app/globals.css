@@ -1,0 +1,355 @@
+@import "../styles/theme.css";
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================================================
+   OMEGA PRO — Premium Design System v3
+   Inspired by Linear, Figma, Arc — refined for professional use.
+   ============================================================ */
+
+:root {
+  /* Background layers — soft charcoal, not pure black */
+  --omega-bg: 15, 15, 18;
+  --omega-surface-1: 22, 22, 27;
+  --omega-surface-2: 30, 30, 36;
+  --omega-surface-3: 42, 42, 50;
+  --omega-border: 255, 255, 255;
+
+  /* Accent Colors — professional, not neon */
+  --omega-blue: 82, 139, 255;
+  --omega-purple: 139, 92, 246;
+  --omega-amber: 245, 158, 11;
+  --omega-green: 34, 197, 94;
+  --omega-red: 239, 68, 68;
+
+  /* Text */
+  --omega-text-1: 245, 245, 245;
+  --omega-text-2: 156, 163, 175;
+  --omega-text-3: 107, 114, 128;
+}
+
+/* ============================================================
+   BASE STYLES
+   ============================================================ */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  font-family: inherit;
+}
+
+html {
+  font-family: var(--font-inter, "Inter"), "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  background: rgb(var(--omega-bg));
+  color: rgb(var(--omega-text-1));
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 0;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  outline: none;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+
+/* ============================================================
+   SCROLLBARS
+   ============================================================ */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(var(--omega-border), 0.08);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(var(--omega-border), 0.15);
+}
+
+/* ============================================================
+   UTILITY CLASSES
+   ============================================================ */
+
+/* Surfaces */
+.surface-1 {
+  background: rgb(var(--omega-surface-1));
+}
+
+.surface-2 {
+  background: rgb(var(--omega-surface-2));
+}
+
+.surface-3 {
+  background: rgb(var(--omega-surface-3));
+}
+
+/* Borders — very subtle */
+.border-subtle {
+  border-color: rgba(var(--omega-border), 0.05);
+}
+
+.border-medium {
+  border-color: rgba(var(--omega-border), 0.08);
+}
+
+/* Text */
+.text-primary {
+  color: rgb(var(--omega-text-1));
+}
+
+.text-secondary {
+  color: rgb(var(--omega-text-2));
+}
+
+.text-muted {
+  color: rgb(var(--omega-text-3));
+}
+
+/* Accent Colors */
+.text-blue {
+  color: rgb(var(--omega-blue));
+}
+
+.text-purple {
+  color: rgb(var(--omega-purple));
+}
+
+.text-amber {
+  color: rgb(var(--omega-amber));
+}
+
+.text-green {
+  color: rgb(var(--omega-green));
+}
+
+.text-red {
+  color: rgb(var(--omega-red));
+}
+
+.bg-blue {
+  background: rgb(var(--omega-blue));
+}
+
+.bg-green {
+  background: rgb(var(--omega-green));
+}
+
+.bg-red {
+  background: rgb(var(--omega-red));
+}
+
+.bg-amber {
+  background: rgb(var(--omega-amber));
+}
+
+/* Label — small, muted, uppercase */
+.label {
+  font-size: 11px;
+  font-weight: 500;
+  color: rgb(var(--omega-text-3));
+}
+
+/* Card — minimal borders, subtle hover */
+.card {
+  background: rgb(var(--omega-surface-1));
+  border: 1px solid rgba(var(--omega-border), 0.05);
+  border-radius: 10px;
+  transition: border-color 0.15s ease;
+}
+
+.card:hover {
+  border-color: rgba(var(--omega-border), 0.1);
+}
+
+/* Button Base */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 7px 12px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+
+.btn:active {
+  transform: scale(0.97);
+}
+
+.btn-primary {
+  background: rgb(var(--omega-blue));
+  color: white;
+}
+
+.btn-primary:hover {
+  filter: brightness(1.08);
+}
+
+.btn-secondary {
+  background: rgba(var(--omega-border), 0.05);
+  color: rgb(var(--omega-text-1));
+  border-color: rgba(var(--omega-border), 0.08);
+}
+
+.btn-secondary:hover {
+  background: rgba(var(--omega-border), 0.08);
+}
+
+.btn-ghost {
+  background: transparent;
+  color: rgb(var(--omega-text-2));
+}
+
+.btn-ghost:hover {
+  background: rgba(var(--omega-border), 0.05);
+  color: rgb(var(--omega-text-1));
+}
+
+/* Pill/Badge — compact, rounded */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 3px 8px;
+  border-radius: 5px;
+  background: rgba(var(--omega-border), 0.05);
+  color: rgb(var(--omega-text-2));
+}
+
+/* Input */
+.input {
+  background: rgba(var(--omega-border), 0.03);
+  border: 1px solid rgba(var(--omega-border), 0.06);
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: rgb(var(--omega-text-1));
+  outline: none;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+.input::placeholder {
+  color: rgb(var(--omega-text-3));
+}
+
+.input:focus {
+  border-color: rgba(var(--omega-blue), 0.4);
+  box-shadow: 0 0 0 2px rgba(var(--omega-blue), 0.08);
+}
+
+/* Progress Bar */
+.progress-track {
+  height: 3px;
+  background: rgba(var(--omega-border), 0.06);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+/* ============================================================
+   RANGE SLIDER
+   ============================================================ */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 3px;
+  background: rgba(var(--omega-border), 0.08);
+  border-radius: 2px;
+  outline: none;
+  cursor: pointer;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  background: rgb(var(--omega-blue));
+  border-radius: 50%;
+  border: 2px solid rgb(var(--omega-bg));
+  cursor: pointer;
+  transition: transform 0.1s ease;
+}
+
+input[type="range"]::-webkit-slider-thumb:hover {
+  transform: scale(1.1);
+}
+
+input[type="range"]::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  background: rgb(var(--omega-blue));
+  border-radius: 50%;
+  border: 2px solid rgb(var(--omega-bg));
+  cursor: pointer;
+}
+
+/* ============================================================
+   ANIMATIONS
+   ============================================================ */
+@keyframes pulse-soft {
+
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.pulse-soft {
+  animation: pulse-soft 2s infinite ease-in-out;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.spin {
+  animation: spin 1s linear infinite;
+}

@@ -1,0 +1,2620 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#08090A">
+    <title>Omega Review - {{ job.program_name }}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+    <!-- Player.js for Bunny Stream video control -->
+    <script src="https://cdn.jsdelivr.net/npm/player.js@0.1.0/dist/player.min.js"></script>
+    <!-- Wavesurfer.js for waveform display -->
+    <script src="https://unpkg.com/wavesurfer.js@7"></script>
+    <script src="https://unpkg.com/wavesurfer.js@7/dist/plugins/regions.min.js"></script>
+</head>
+
+<body>
+    <!-- Header -->
+    <header class="header">
+        <div class="header-left">
+            <span class="logo">Omega Review</span>
+            <div class="job-info">
+                <span class="job-title">{{ job.program_name }}</span>
+                <span class="language-badge">{{ job.target_language }}</span>
+            </div>
+        </div>
+        <div class="header-right">
+            <!-- Issues Filter Toggle -->
+            <div class="issues-filter-toggle">
+                <button class="btn btn-filter" id="issuesOnlyBtn" onclick="toggleIssuesOnly()">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16">
+                        <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon>
+                    </svg>
+                    <span id="issuesOnlyLabel">Show Issues Only</span>
+                </button>
+                <span class="issue-nav-hint" id="issueNavHint" style="display: none;">Tab to navigate</span>
+            </div>
+            <!-- Issue Navigation -->
+            <div class="issue-navigation" id="issueNavigation" style="display: none;">
+                <button class="btn btn-small btn-nav" onclick="navigateIssue(-1)" title="Previous Issue (Shift+Tab)">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                        <polyline points="15 18 9 12 15 6"></polyline>
+                    </svg>
+                    Prev
+                </button>
+                <span class="issue-position" id="issuePosition">0 / 0</span>
+                <button class="btn btn-small btn-nav" onclick="navigateIssue(1)" title="Next Issue (Tab)">
+                    Next
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                        <polyline points="9 18 15 12 9 6"></polyline>
+                    </svg>
+                </button>
+            </div>
+            <!-- Batch AI Fix Button -->
+            <button class="btn btn-ai-batch" id="batchAIBtn" onclick="batchFixWithAI()" title="Get AI suggestions for all issues">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                    <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"></path>
+                </svg>
+                <span id="batchAILabel">Fix All with AI</span>
+            </button>
+            <div class="progress-info">
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progressFill" style="width: 0%"></div>
+                </div>
+                <span class="progress-text" id="progressText">0 / {{ job.subtitle_count }}</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- Issue Summary Banner (shown in issues-only mode) -->
+    <div class="issue-summary-banner" id="issueSummaryBanner" style="display: none;">
+        <div class="issue-summary-content">
+            <div class="issue-counts">
+                <span class="issue-count errors" id="summaryErrorCount">
+                    <span class="count-icon">❌</span>
+                    <span class="count-value">0</span> errors
+                </span>
+                <span class="issue-count warnings" id="summaryWarningCount">
+                    <span class="count-icon">⚠️</span>
+                    <span class="count-value">0</span> warnings
+                </span>
+                <span class="issue-count resolved" id="summaryResolvedCount">
+                    <span class="count-icon">✅</span>
+                    <span class="count-value">0</span> resolved
+                </span>
+            </div>
+            <div class="issue-progress-bar">
+                <div class="issue-progress-fill" id="issueProgressFill" style="width: 0%"></div>
+            </div>
+            <span class="issue-progress-text" id="issueProgressText">0% complete</span>
+        </div>
+    </div>
+
+    <!-- Quality Report -->
+    {% if job.editor_report %}
+    <div class="quality-report-container">
+        <div class="quality-report">
+            <div class="quality-report-main">
+                {% set final_rating = job.editor_report.final_rating or job.editor_report.rating %}
+                {% set final_tier = job.editor_report.final_quality_tier or job.editor_report.quality_tier %}
+                <span
+                    class="rating-badge {{ 'excellent' if final_rating >= 9 else ('good' if final_rating >= 7 else 'fair') }}">
+                    {{ final_rating | default('—') }}/10
+                </span>
+                <span class="quality-tier {{ final_tier | default('') | lower | replace(' ', '-') }}">
+                    {{ final_tier | default('') }}
+                </span>
+                {% if job.editor_report.polish_engine == 'claude' %}
+                <span class="polish-badge claude">✓ Claude Polished</span>
+                {% elif job.editor_report.polish_engine == 'gemini_only' %}
+                <span class="polish-badge gemini">Gemini Only</span>
+                {% endif %}
+            </div>
+            <div class="quality-summary">"{{ job.editor_report.summary | default('') }}"</div>
+        </div>
+
+        {% if job.editor_report.major_issues and job.editor_report.major_issues | length > 0 %}
+        <div class="quality-warnings">
+            <div class="warning-header">
+                <span class="warning-icon">⚠️</span>
+                <span class="warning-title">Issues to Review</span>
+            </div>
+            <div class="warning-tags">
+                {% for issue in job.editor_report.major_issues %}
+                <span class="warning-tag">{{ issue }}</span>
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
+
+        {% if job.editor_report.polish_patterns and job.editor_report.polish_patterns | length > 0 %}
+        <div class="quality-warnings polish-patterns">
+            <div class="warning-header">
+                <span class="warning-icon">🎯</span>
+                <span class="warning-title">Patterns Found by Senior Editor</span>
+            </div>
+            <div class="warning-tags">
+                {% for pattern in job.editor_report.polish_patterns %}
+                <span class="warning-tag pattern-tag">{{ pattern }}</span>
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
+
+        {% if job.editor_report.suggestions %}
+        <div class="quality-suggestions">
+            <div class="suggestion-header">
+                <span class="suggestion-icon">💡</span>
+                <span class="suggestion-title">Editor Suggestions</span>
+                <button class="toggle-suggestions" onclick="toggleSuggestions()" id="toggleSuggestionsBtn">Show</button>
+            </div>
+            <div class="suggestion-content" id="suggestionContent" style="display: none;">
+                {{ job.editor_report.suggestions }}
+            </div>
+        </div>
+        {% endif %}
+    </div>
+    {% endif %}
+
+    <!-- Video Preview (Bunny Stream) -->
+    {% if job.has_video and job.bunny_embed_url %}
+    <div class="video-preview">
+        <div class="video-container">
+            <iframe id="videoPlayer"
+                src="{{ job.bunny_embed_url }}?autoplay=false&loop=false&muted=false&preload=true&responsive=true"
+                loading="lazy" style="border:none; position:absolute; top:0; left:0; width:100%; height:100%;"
+                allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture" allowfullscreen>
+            </iframe>
+        </div>
+        <div class="video-controls">
+            <button class="btn btn-small" onclick="toggleWaveform()" id="waveformToggleBtn">
+                📊 Show Timeline
+            </button>
+            <button class="btn btn-small" onclick="toggleVideoSize()">
+                <span id="videoSizeIcon">📺</span> Toggle Size
+            </button>
+            <span class="video-hint">Click a subtitle to seek to that time</span>
+        </div>
+    </div>
+    {% else %}
+    <div class="no-video-notice">
+        <span>🎧 Audio-only mode — Click play buttons to hear segments</span>
+    </div>
+    {% endif %}
+
+    <!-- Waveform Timeline -->
+    <div class="waveform-container" id="waveformContainer" style="display: none;">
+        <div class="waveform-header">
+            <span class="waveform-title">Timeline</span>
+            <div class="waveform-controls">
+                <button class="btn btn-small" onclick="waveformZoomIn()" title="Zoom In">+</button>
+                <button class="btn btn-small" onclick="waveformZoomOut()" title="Zoom Out">-</button>
+                <button class="btn btn-small" onclick="toggleWaveform()">Hide Timeline</button>
+            </div>
+        </div>
+        <div id="waveform"></div>
+        <div class="waveform-legend">
+            <span class="legend-item good">≤20 CPS Good</span>
+            <span class="legend-item warning">21-25 CPS Warning</span>
+            <span class="legend-item danger">>25 CPS Too Fast</span>
+        </div>
+    </div>
+
+    <!-- Search Bar -->
+    <div class="search-bar" id="searchBar">
+        <div class="search-input-wrapper">
+            <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                <circle cx="11" cy="11" r="8"></circle>
+                <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+            </svg>
+            <input type="text" id="searchInput" placeholder="Search segments... (press / to focus)" oninput="filterBySearch(this.value)">
+            <span class="search-count" id="searchCount"></span>
+        </div>
+        <button class="btn btn-small" onclick="clearSearch()">Clear</button>
+    </div>
+
+    <!-- Bulk Action Bar -->
+    <div class="bulk-action-bar" id="bulkActionBar" style="display: none;">
+        <span class="selection-count" id="selectionCount">0 selected</span>
+        <div class="bulk-actions">
+            <button class="btn btn-small btn-primary" onclick="bulkApprove()">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                    <polyline points="20 6 9 17 4 12"></polyline>
+                </svg>
+                Approve Selected
+            </button>
+            <button class="btn btn-small btn-warning" onclick="bulkFlag()">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                    <path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"></path>
+                </svg>
+                Flag Selected
+            </button>
+            <button class="btn btn-small" onclick="selectAllVisible()">Select All Visible</button>
+            <button class="btn btn-small" onclick="clearSelection()">Clear Selection</button>
+        </div>
+    </div>
+
+    <!-- Main Content -->
+    <main class="main-content">
+        <div class="subtitle-list" id="subtitleList">
+            {% for segment in job.translation.segments %}
+            <div class="subtitle-card" data-index="{{ loop.index0 }}" data-status="pending">
+                <div class="card-header">
+                    <div class="card-select">
+                        <input type="checkbox" class="segment-checkbox" data-index="{{ loop.index0 }}" onclick="toggleSegmentSelection({{ loop.index0 }})">
+                    </div>
+                    <span class="timestamp">{{ segment.start | default('0:00') }} → {{ segment.end | default('0:00')
+                        }}</span>
+                    <div class="header-actions">
+                        <span class="quality-badge" id="quality-badge-{{ loop.index0 }}" style="display: none;"></span>
+                        <button class="audio-btn" onclick="playAudio({{ loop.index0 }})" title="Play audio">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                                stroke-linecap="round" stroke-linejoin="round">
+                                <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="card-content">
+                    <div class="original-text">
+                        {% if job.skeleton.segments[loop.index0] %}
+                        {{ job.skeleton.segments[loop.index0].text | default('') }}
+                        {% endif %}
+                    </div>
+                    <div class="translation-wrapper">
+                        <textarea class="translation-input" data-index="{{ loop.index0 }}"
+                            data-start="{{ segment.start | default('0:00') }}"
+                            data-end="{{ segment.end | default('0:00') }}"
+                            placeholder="Translation...">{{ segment.text | default('') }}</textarea>
+                        <div class="live-cps-indicator" id="cps-indicator-{{ loop.index0 }}">
+                            <span class="cps-value">-- CPS</span>
+                            <span class="char-count">0 chars</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Inline AI Suggestion (hidden by default) -->
+                <div class="inline-suggestion" id="inline-suggestion-{{ loop.index0 }}" style="display: none;">
+                    <div class="inline-suggestion-header">
+                        <span class="inline-suggestion-icon">⚡</span>
+                        <span class="inline-suggestion-title">AI Suggestion</span>
+                        <span class="inline-suggestion-confidence" id="inline-confidence-{{ loop.index0 }}"></span>
+                    </div>
+                    <div class="inline-suggestion-text" id="inline-suggestion-text-{{ loop.index0 }}"></div>
+                    <div class="inline-suggestion-reasoning" id="inline-reasoning-{{ loop.index0 }}"></div>
+                    <div class="inline-suggestion-actions">
+                        <button class="btn-inline-reject" onclick="rejectInlineSuggestion({{ loop.index0 }})" title="Reject suggestion">
+                            ✕ Reject <kbd>Esc</kbd>
+                        </button>
+                        <button class="btn-inline-accept" onclick="acceptInlineSuggestion({{ loop.index0 }})" title="Accept suggestion">
+                            ✓ Accept <kbd>↵</kbd>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="card-actions">
+                    <button class="action-btn ai-suggest" onclick="getAISuggestion({{ loop.index0 }})" title="Get AI Suggestion">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                            stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"></path>
+                        </svg>
+                    </button>
+                    <button class="action-btn approve" onclick="approveOne({{ loop.index0 }})" title="Approve">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                            stroke-linecap="round" stroke-linejoin="round">
+                            <polyline points="20 6 9 17 4 12"></polyline>
+                        </svg>
+                    </button>
+                    <button class="action-btn flag" onclick="flagOne({{ loop.index0 }})" title="Flag">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                            stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"></path>
+                            <line x1="4" y1="22" x2="4" y2="15"></line>
+                        </svg>
+                    </button>
+                    <button class="action-btn delete" onclick="deleteOne({{ loop.index0 }})" title="Delete">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                            stroke-linecap="round" stroke-linejoin="round">
+                            <polyline points="3 6 5 6 21 6"></polyline>
+                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2">
+                            </path>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <div class="footer-left">
+            <button class="btn btn-secondary" onclick="saveDraft()">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                    stroke-linejoin="round">
+                    <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
+                    <polyline points="17 21 17 13 7 13 7 21"></polyline>
+                    <polyline points="7 3 7 8 15 8"></polyline>
+                </svg>
+                Save Draft
+            </button>
+            <span class="autosave-status" id="autosaveStatus"></span>
+        </div>
+        <div class="footer-right">
+            <button class="btn btn-warning" onclick="showFlagged()">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                    stroke-linejoin="round">
+                    <path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"></path>
+                    <line x1="4" y1="22" x2="4" y2="15"></line>
+                </svg>
+                Flagged (<span id="flaggedCount">0</span>)
+            </button>
+            <button class="btn btn-primary" onclick="approveAll()">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                    stroke-linejoin="round">
+                    <polyline points="20 6 9 17 4 12"></polyline>
+                </svg>
+                Approve All
+            </button>
+        </div>
+    </footer>
+
+    <!-- Celebration Modal -->
+    <div class="modal" id="celebrationModal">
+        <div class="modal-content">
+            <div class="modal-icon">✓</div>
+            <h2>Review Complete</h2>
+            <p class="modal-stats" id="celebrationStats"></p>
+            <p class="modal-message">Video will be processed within 30 minutes.</p>
+            <button class="btn btn-primary" onclick="closeModal()">Done</button>
+        </div>
+    </div>
+
+    <!-- AI Suggestion Modal -->
+    <div class="modal" id="aiModal">
+        <div class="modal-content ai-modal-content">
+            <button class="modal-close" onclick="closeAIModal()">×</button>
+            <div class="ai-header">
+                <div class="modal-icon">⚡</div>
+                <h2>AI Suggestion</h2>
+            </div>
+            <div class="ai-body">
+                <div class="ai-comparison">
+                    <div class="ai-section">
+                        <label>Original English:</label>
+                        <div class="ai-text original" id="aiOriginalText"></div>
+                    </div>
+                    <div class="ai-section">
+                        <label>Current Translation:</label>
+                        <div class="ai-text current" id="aiCurrentText"></div>
+                    </div>
+                    <div class="ai-section highlight">
+                        <label>AI Suggestion:</label>
+                        <div class="ai-text suggestion" id="aiSuggestionText"></div>
+                    </div>
+                </div>
+                <div class="ai-reasoning">
+                    <label>Reasoning:</label>
+                    <p id="aiReasoning"></p>
+                </div>
+                <div class="ai-confidence">
+                    <label>Confidence:</label>
+                    <div class="confidence-bar">
+                        <div class="confidence-fill" id="aiConfidenceFill"></div>
+                    </div>
+                    <span id="aiConfidenceText"></span>
+                </div>
+            </div>
+            <div class="ai-actions">
+                <button class="btn btn-secondary" onclick="closeAIModal()">Reject</button>
+                <button class="btn btn-primary" onclick="acceptAISuggestion()">Accept Suggestion</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Reviewer Name Modal -->
+    <div class="modal" id="reviewerModal">
+        <div class="modal-content" style="max-width: 400px;">
+            <h2 style="margin-bottom: 16px;">Final Review</h2>
+            <p style="color: var(--text-secondary); margin-bottom: 16px;">Please enter your name to complete the review.</p>
+            <div style="margin-bottom: 16px;">
+                <input type="text" id="reviewerNameInput" placeholder="Your name"
+                    style="width: 100%; padding: 12px; border: 1px solid var(--border-primary);
+                    border-radius: 6px; background: var(--bg-tertiary); color: var(--text-primary);
+                    font-size: 14px;">
+            </div>
+            <div style="display: flex; gap: 8px; justify-content: flex-end;">
+                <button class="btn btn-secondary" onclick="closeReviewerModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="submitWithReviewerName()">Submit Review</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Audio -->
+    <audio id="audioPlayer"></audio>
+
+    <!-- Keyboard Shortcuts Modal -->
+    <div class="modal" id="shortcutsModal">
+        <div class="modal-content shortcuts-modal-content">
+            <button class="modal-close" onclick="closeShortcutsModal()">&times;</button>
+            <h2>⌨️ Keyboard Shortcuts</h2>
+            <div class="shortcuts-grid">
+                <div class="shortcut-group">
+                    <h3>Navigation</h3>
+                    <div class="shortcut"><kbd>I</kbd><span>Toggle Issues Only</span></div>
+                    <div class="shortcut"><kbd>Tab</kbd><span>Next Issue</span></div>
+                    <div class="shortcut"><kbd>Shift+Tab</kbd><span>Previous Issue</span></div>
+                    <div class="shortcut"><kbd>Alt+↓</kbd><span>Next Segment</span></div>
+                    <div class="shortcut"><kbd>Alt+↑</kbd><span>Previous Segment</span></div>
+                    <div class="shortcut"><kbd>Esc</kbd><span>Exit Issues Mode</span></div>
+                </div>
+                <div class="shortcut-group">
+                    <h3>Editing</h3>
+                    <div class="shortcut"><kbd>Cmd+Enter</kbd><span>Approve Segment</span></div>
+                    <div class="shortcut"><kbd>Cmd+S</kbd><span>Save Draft</span></div>
+                    <div class="shortcut"><kbd>Cmd+Z</kbd><span>Undo</span></div>
+                    <div class="shortcut"><kbd>Cmd+Shift+Z</kbd><span>Redo</span></div>
+                </div>
+                <div class="shortcut-group">
+                    <h3>AI Suggestions</h3>
+                    <div class="shortcut"><kbd>Enter</kbd><span>Accept Suggestion</span></div>
+                    <div class="shortcut"><kbd>Esc</kbd><span>Reject Suggestion</span></div>
+                </div>
+                <div class="shortcut-group">
+                    <h3>Tools</h3>
+                    <div class="shortcut"><kbd>?</kbd><span>Show This Help</span></div>
+                    <div class="shortcut"><kbd>/</kbd><span>Focus Search</span></div>
+                    <div class="shortcut"><kbd>Cmd+A</kbd><span>Select All Visible</span></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Context Window (shows adjacent subtitles when in issues-only mode) -->
+    <div class="context-window" id="contextWindow">
+        <div class="context-window-header">
+            <span class="context-window-title">Context</span>
+            <button class="modal-close" onclick="hideContextWindow()" style="position: static; width: 20px; height: 20px; font-size: 14px;">&times;</button>
+        </div>
+        <div id="contextWindowContent"></div>
+    </div>
+
+    <!-- Keyboard Shortcuts Hint -->
+    <div class="shortcuts-hint" id="shortcutsHint" style="display: none;">
+        <kbd>I</kbd> Issues Only &nbsp;|&nbsp;
+        <kbd>Tab</kbd> Next Issue &nbsp;|&nbsp;
+        <kbd>Cmd+Enter</kbd> Approve &nbsp;|&nbsp;
+        <kbd>Esc</kbd> Exit
+    </div>
+
+    <script>
+        const jobId = "{{ job.job_id }}";
+        const totalCount = {{ job.subtitle_count }};
+        let approvedCount = 0;
+        let flaggedCount = 0;
+        let deletedIndices = new Set();
+        let startTime = Date.now();
+        let hasUnsavedChanges = false;
+
+        // Build segment start times as strings from the data
+        const segmentStartStrings = [
+            {% for segment in job.translation.segments %}
+        "{{ segment.start | default('0:00') }}",
+            {% endfor %}
+        ];
+
+        // Parse time string (MM:SS or HH:MM:SS) to seconds
+        function parseTimeToSeconds(timeStr) {
+            if (!timeStr) return 0;
+            const parts = timeStr.split(':').map(Number);
+            if (parts.length === 3) {
+                return parts[0] * 3600 + parts[1] * 60 + parts[2];
+            } else if (parts.length === 2) {
+                return parts[0] * 60 + parts[1];
+            }
+            return parseFloat(timeStr) || 0;
+        }
+
+        // Video player (Bunny Stream via Player.js)
+        let videoPlayer = null;
+
+        document.addEventListener('DOMContentLoaded', () => {
+            updateProgress();
+            startAutoSave();
+            setupKeyboardShortcuts();
+            setupChangeTracking();
+            initVideoPlayer();
+            setupTimestampClicks();
+        });
+
+        function initVideoPlayer() {
+            const iframe = document.getElementById('videoPlayer');
+            if (iframe && typeof playerjs !== 'undefined') {
+                videoPlayer = new playerjs.Player(iframe);
+                videoPlayer.on('ready', () => {
+                    console.log('Bunny video player ready');
+                });
+            }
+        }
+
+        function seekToSegment(index) {
+            if (!videoPlayer) return;
+            const timeStr = segmentStartStrings[index] || '0:00';
+            const time = parseTimeToSeconds(timeStr);
+            videoPlayer.setCurrentTime(time);
+            videoPlayer.play();
+
+            // Highlight the current segment
+            document.querySelectorAll('.subtitle-card').forEach(c => c.classList.remove('playing'));
+            const card = document.querySelector(`[data-index="${index}"]`);
+            if (card) card.classList.add('playing');
+        }
+
+        function setupTimestampClicks() {
+            document.querySelectorAll('.timestamp').forEach((ts, index) => {
+                ts.style.cursor = 'pointer';
+                ts.title = 'Click to jump to this time in video';
+                ts.addEventListener('click', () => seekToSegment(index));
+            });
+        }
+
+        function toggleVideoSize() {
+            const preview = document.querySelector('.video-preview');
+            if (preview) {
+                preview.classList.toggle('collapsed');
+                const icon = document.getElementById('videoSizeIcon');
+                if (icon) {
+                    icon.textContent = preview.classList.contains('collapsed') ? '📺' : '🔲';
+                }
+            }
+        }
+
+        function setupChangeTracking() {
+            document.querySelectorAll('.translation-input').forEach(input => {
+                input.addEventListener('input', () => hasUnsavedChanges = true);
+            });
+            window.addEventListener('beforeunload', (e) => {
+                if (hasUnsavedChanges) {
+                    e.preventDefault();
+                    e.returnValue = '';
+                }
+            });
+        }
+
+        function updateProgress() {
+            const cards = document.querySelectorAll('.subtitle-card:not([data-deleted="true"])');
+            const approved = document.querySelectorAll('.subtitle-card[data-status="approved"]').length;
+            const flagged = document.querySelectorAll('.subtitle-card[data-status="flagged"]').length;
+
+            approvedCount = approved;
+            flaggedCount = flagged;
+
+            const total = cards.length;
+            const reviewed = approved + flagged;
+            const percent = total > 0 ? (reviewed / total) * 100 : 0;
+
+            document.getElementById('progressFill').style.width = percent + '%';
+            document.getElementById('progressText').textContent = `${reviewed} / ${total}`;
+            document.getElementById('flaggedCount').textContent = flagged;
+        }
+
+        async function playAudio(index) {
+            // Prefer video player if available (seeks to segment time)
+            if (videoPlayer) {
+                seekToSegment(index);
+                return;
+            }
+            // Fallback to separate audio endpoint
+            const audio = document.getElementById('audioPlayer');
+            audio.src = `/api/audio/${jobId}/${index}`;
+            try { await audio.play(); } catch (e) { console.log('Audio unavailable'); }
+        }
+
+        function approveOne(index) {
+            const card = document.querySelector(`[data-index="${index}"]`);
+            card.dataset.status = 'approved';
+            card.classList.add('approved');
+            card.classList.remove('flagged');
+            hasUnsavedChanges = true;
+            updateProgress();
+
+            const next = card.nextElementSibling;
+            if (next && !next.dataset.deleted) {
+                next.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+        }
+
+        function flagOne(index) {
+            const card = document.querySelector(`[data-index="${index}"]`);
+            card.dataset.status = 'flagged';
+            card.classList.add('flagged');
+            card.classList.remove('approved');
+            hasUnsavedChanges = true;
+            updateProgress();
+        }
+
+        function deleteOne(index) {
+            if (!confirm('Delete this line?')) return;
+            const card = document.querySelector(`[data-index="${index}"]`);
+            card.dataset.deleted = 'true';
+            card.style.display = 'none';
+            deletedIndices.add(index);
+            hasUnsavedChanges = true;
+            updateProgress();
+        }
+
+        function collectSegments() {
+            const segments = [];
+            document.querySelectorAll('.subtitle-card:not([data-deleted="true"])').forEach(card => {
+                const index = parseInt(card.dataset.index);
+                const textarea = card.querySelector('.translation-input');
+                segments.push({ index, text: textarea.value, status: card.dataset.status });
+            });
+            return segments;
+        }
+
+        // localStorage key for this job's draft
+        const LOCAL_DRAFT_KEY = `omega_draft_${jobId}`;
+
+        async function saveDraft() {
+            const status = document.getElementById('autosaveStatus');
+            status.textContent = 'Saving...';
+            const segments = collectSegments();
+
+            // Always save to localStorage as backup (instant, works offline)
+            try {
+                localStorage.setItem(LOCAL_DRAFT_KEY, JSON.stringify({
+                    segments,
+                    timestamp: Date.now(),
+                    deletedIndices: Array.from(deletedIndices)
+                }));
+            } catch (e) {
+                console.log('localStorage save failed:', e);
+            }
+
+            // Save to server
+            try {
+                const res = await fetch(`/api/job/${jobId}/save`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ segments })
+                });
+                if (res.ok) {
+                    status.textContent = 'Saved';
+                    hasUnsavedChanges = false;
+                    setTimeout(() => status.textContent = '', 2000);
+                }
+            } catch (e) {
+                status.textContent = 'Local backup saved';
+                setTimeout(() => status.textContent = '', 2000);
+            }
+        }
+
+        function checkLocalDraftRecovery() {
+            try {
+                const saved = localStorage.getItem(LOCAL_DRAFT_KEY);
+                if (!saved) return;
+
+                const draft = JSON.parse(saved);
+                const ageMinutes = (Date.now() - draft.timestamp) / 60000;
+
+                // Only offer recovery for drafts less than 24 hours old
+                if (ageMinutes > 1440) {
+                    localStorage.removeItem(LOCAL_DRAFT_KEY);
+                    return;
+                }
+
+                // Check if there are actual differences from current state
+                const currentSegments = collectSegments();
+                const hasDifferences = draft.segments.some(s => {
+                    const current = currentSegments.find(c => c.index === s.index);
+                    return current && (current.text !== s.text || current.status !== s.status);
+                });
+
+                if (!hasDifferences) return;
+
+                // Show recovery prompt
+                const timeAgo = ageMinutes < 1 ? 'just now' :
+                    ageMinutes < 60 ? `${Math.round(ageMinutes)} min ago` :
+                    `${Math.round(ageMinutes / 60)} hours ago`;
+
+                if (confirm(`Found unsaved changes from ${timeAgo}. Restore?`)) {
+                    restoreFromDraft(draft);
+                } else {
+                    localStorage.removeItem(LOCAL_DRAFT_KEY);
+                }
+            } catch (e) {
+                console.log('Draft recovery check failed:', e);
+            }
+        }
+
+        function restoreFromDraft(draft) {
+            // Restore segment text and status
+            draft.segments.forEach(s => {
+                const card = document.querySelector(`[data-index="${s.index}"]`);
+                if (!card) return;
+
+                const textarea = card.querySelector('.translation-input');
+                if (textarea) textarea.value = s.text;
+
+                card.dataset.status = s.status || 'pending';
+                card.classList.remove('approved', 'flagged');
+                if (s.status === 'approved') card.classList.add('approved');
+                if (s.status === 'flagged') card.classList.add('flagged');
+            });
+
+            // Restore deleted indices
+            if (draft.deletedIndices) {
+                draft.deletedIndices.forEach(idx => {
+                    const card = document.querySelector(`[data-index="${idx}"]`);
+                    if (card) {
+                        card.dataset.deleted = 'true';
+                        card.style.display = 'none';
+                        deletedIndices.add(idx);
+                    }
+                });
+            }
+
+            updateProgress();
+            hasUnsavedChanges = true;
+            document.getElementById('autosaveStatus').textContent = 'Draft restored';
+            setTimeout(() => document.getElementById('autosaveStatus').textContent = '', 3000);
+        }
+
+        function clearLocalDraft() {
+            localStorage.removeItem(LOCAL_DRAFT_KEY);
+        }
+
+        function startAutoSave() {
+            // Check for local draft recovery on start
+            checkLocalDraftRecovery();
+            // Auto-save every 30 seconds
+            setInterval(() => { if (hasUnsavedChanges) saveDraft(); }, 30000);
+        }
+
+        async function approveAll() {
+            document.querySelectorAll('.subtitle-card:not([data-deleted="true"]):not([data-status="approved"])').forEach(card => {
+                if (card.dataset.status !== 'flagged') {
+                    card.dataset.status = 'approved';
+                    card.classList.add('approved');
+                }
+            });
+            updateProgress();
+
+            if (flaggedCount > 0 && !confirm(`${flaggedCount} flagged items. Continue?`)) return;
+
+            // Show reviewer name modal instead of submitting directly
+            showReviewerModal();
+        }
+
+        function showReviewerModal() {
+            // Pre-fill with saved name if available
+            const savedName = localStorage.getItem('omega_reviewer_name') || '';
+            document.getElementById('reviewerNameInput').value = savedName;
+            document.getElementById('reviewerModal').classList.add('show');
+            document.getElementById('reviewerNameInput').focus();
+        }
+
+        function closeReviewerModal() {
+            document.getElementById('reviewerModal').classList.remove('show');
+        }
+
+        async function submitWithReviewerName() {
+            const reviewerName = document.getElementById('reviewerNameInput').value.trim() || 'Anonymous Reviewer';
+
+            // Save name for future use
+            localStorage.setItem('omega_reviewer_name', reviewerName);
+
+            closeReviewerModal();
+
+            try {
+                const res = await fetch(`/api/job/${jobId}/approve`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ segments: collectSegments(), reviewer_name: reviewerName })
+                });
+                if (res.ok) {
+                    hasUnsavedChanges = false;
+                    clearLocalDraft();  // Clean up localStorage on successful approval
+                    showCelebration();
+                }
+            } catch (e) {
+                alert('Error submitting');
+            }
+        }
+
+        function showCelebration() {
+            const elapsed = Math.round((Date.now() - startTime) / 60000);
+            const reviewed = totalCount - deletedIndices.size;
+            document.getElementById('celebrationStats').textContent = `${reviewed} lines reviewed in ${elapsed} min`;
+            document.getElementById('celebrationModal').classList.add('show');
+        }
+
+        function closeModal() {
+            document.getElementById('celebrationModal').classList.remove('show');
+        }
+
+        function showFlagged() {
+            const first = document.querySelector('.subtitle-card.flagged');
+            if (first) first.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            else alert('No flagged items');
+        }
+
+        function setupKeyboardShortcuts() {
+            document.addEventListener('keydown', (e) => {
+                if (e.target.tagName === 'TEXTAREA') {
+                    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                        e.preventDefault();
+                        approveOne(parseInt(e.target.dataset.index));
+                    }
+                    return;
+                }
+                if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+                    e.preventDefault();
+                    saveDraft();
+                }
+            });
+        }
+
+        // =============================================================================
+        // AI Assistant Functions (Inline Suggestions)
+        // =============================================================================
+
+        let currentAISegmentIndex = null;
+        let currentAISuggestion = null;
+        let pendingSuggestions = new Map(); // Store suggestions per segment index
+        let batchAIInProgress = false;
+
+        async function getAISuggestion(index) {
+            const card = document.querySelector(`.subtitle-card[data-index="${index}"]`);
+            const textarea = card.querySelector('.translation-input');
+            const originalDiv = card.querySelector('.original-text');
+            const aiButton = card.querySelector('.action-btn.ai-suggest');
+            const inlineSuggestion = document.getElementById(`inline-suggestion-${index}`);
+
+            const currentText = textarea.value.trim();
+            const originalText = originalDiv.textContent.trim();
+
+            if (!currentText || !originalText) {
+                alert('Missing text for AI suggestion');
+                return;
+            }
+
+            // Hide any existing inline suggestion first
+            hideAllInlineSuggestions();
+
+            // Show loading state
+            aiButton.disabled = true;
+            aiButton.style.opacity = '0.5';
+            aiButton.innerHTML = '<span class="ai-loading-spin">⏳</span>';
+
+            try {
+                const response = await fetch('/api/segment/suggest', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        source_text: originalText,
+                        translated_text: currentText,
+                        target_language: '{{ job.target_language }}',
+                        context: {}
+                    })
+                });
+
+                const data = await response.json();
+
+                // Reset button
+                resetAIButton(aiButton);
+
+                if (!data.available) {
+                    alert('AI assistant not available: ' + (data.error || 'Unknown error'));
+                    return;
+                }
+
+                if (data.error) {
+                    alert('AI suggestion failed: ' + data.error);
+                    return;
+                }
+
+                // Store suggestion and show INLINE (not modal)
+                currentAISegmentIndex = index;
+                currentAISuggestion = data;
+                pendingSuggestions.set(index, data);
+
+                showInlineSuggestion(index, currentText, data);
+
+            } catch (error) {
+                console.error('AI suggestion error:', error);
+                alert('Failed to get AI suggestion: ' + error.message);
+                resetAIButton(aiButton);
+            }
+        }
+
+        function resetAIButton(aiButton) {
+            aiButton.disabled = false;
+            aiButton.style.opacity = '1';
+            aiButton.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"></path>
+            </svg>`;
+        }
+
+        function showInlineSuggestion(index, currentText, suggestion) {
+            const container = document.getElementById(`inline-suggestion-${index}`);
+            const textEl = document.getElementById(`inline-suggestion-text-${index}`);
+            const reasoningEl = document.getElementById(`inline-reasoning-${index}`);
+            const confidenceEl = document.getElementById(`inline-confidence-${index}`);
+
+            if (!container) return;
+
+            // Set suggestion text with diff highlighting
+            const diffHtml = generateSimpleDiff(currentText, suggestion.suggestion);
+            textEl.innerHTML = diffHtml;
+
+            // Set reasoning
+            reasoningEl.textContent = suggestion.reasoning;
+
+            // Set confidence badge
+            const confidence = Math.round(suggestion.confidence * 100);
+            let confClass = 'high';
+            let confLabel = 'High';
+            if (confidence < 60) {
+                confClass = 'low';
+                confLabel = 'Low';
+            } else if (confidence < 80) {
+                confClass = 'medium';
+                confLabel = 'Medium';
+            }
+            confidenceEl.innerHTML = `<span class="confidence-badge ${confClass}">${confLabel} (${confidence}%)</span>`;
+
+            // Show container with animation
+            container.style.display = 'block';
+            container.classList.add('suggestion-visible');
+            // LOW FIX: Use data attribute for reliable visibility detection
+            container.setAttribute('data-suggestion-visible', 'true');
+
+            // Scroll into view
+            container.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+            // Focus the card for keyboard handling
+            const card = document.querySelector(`.subtitle-card[data-index="${index}"]`);
+            card.classList.add('has-suggestion');
+        }
+
+        function generateSimpleDiff(original, suggestion) {
+            // If they're the same, just show the text
+            if (original === suggestion) {
+                return `<span class="diff-same">${escapeHtml(suggestion)}</span> <span class="diff-note">(no changes needed)</span>`;
+            }
+            // Otherwise show the new suggestion highlighted
+            return `<span class="diff-new">${escapeHtml(suggestion)}</span>`;
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function hideAllInlineSuggestions() {
+            document.querySelectorAll('.inline-suggestion').forEach(el => {
+                el.style.display = 'none';
+                el.classList.remove('suggestion-visible');
+                el.removeAttribute('data-suggestion-visible');  // LOW FIX: Clear data attribute
+            });
+            document.querySelectorAll('.subtitle-card').forEach(card => {
+                card.classList.remove('has-suggestion');
+            });
+        }
+
+        function acceptInlineSuggestion(index) {
+            const suggestion = pendingSuggestions.get(index);
+            if (!suggestion) return;
+
+            const card = document.querySelector(`.subtitle-card[data-index="${index}"]`);
+            const textarea = card.querySelector('.translation-input');
+
+            // Apply suggestion
+            textarea.value = suggestion.suggestion;
+
+            // Mark as changed and trigger validation
+            textarea.dispatchEvent(new Event('input', { bubbles: true }));
+            hasUnsavedChanges = true;
+
+            // Re-validate the segment
+            validateSegment(index);
+
+            // Hide inline suggestion
+            const container = document.getElementById(`inline-suggestion-${index}`);
+            container.style.display = 'none';
+            container.removeAttribute('data-suggestion-visible');  // LOW FIX
+            card.classList.remove('has-suggestion');
+
+            // Show success flash animation
+            card.classList.add('suggestion-accepted');
+            setTimeout(() => card.classList.remove('suggestion-accepted'), 500);
+
+            // Clear from pending
+            pendingSuggestions.delete(index);
+
+            // Log for learning
+            logAIFeedback(index, 'accept');
+
+            // MEDIUM FIX: Only auto-advance if this segment is part of the batch queue
+            // (Manual AI suggestions should not advance the batch)
+            if (batchAIInProgress && isSegmentInBatch(index)) {
+                showNextBatchSuggestion();
+            }
+        }
+
+        function rejectInlineSuggestion(index) {
+            const container = document.getElementById(`inline-suggestion-${index}`);
+            const card = document.querySelector(`.subtitle-card[data-index="${index}"]`);
+
+            container.style.display = 'none';
+            container.removeAttribute('data-suggestion-visible');  // LOW FIX
+            card.classList.remove('has-suggestion');
+
+            // Clear from pending
+            pendingSuggestions.delete(index);
+
+            // Log for learning
+            logAIFeedback(index, 'reject');
+
+            // MEDIUM FIX: Only auto-advance if this segment is part of the batch queue
+            if (batchAIInProgress && isSegmentInBatch(index)) {
+                showNextBatchSuggestion();
+            }
+        }
+
+        // Helper to check if a segment index is part of the current batch
+        function isSegmentInBatch(index) {
+            return batchSuggestionQueue.some(item => item.index === index);
+        }
+
+        // =============================================================================
+        // Batch AI Suggestions
+        // =============================================================================
+
+        let batchSuggestionQueue = [];
+        let batchCurrentIndex = 0;
+        let batchTotalCount = 0;
+
+        let batchFetchInProgress = false;  // Separate flag for fetch phase
+
+        async function batchFixWithAI() {
+            const btn = document.getElementById('batchAIBtn');
+            const label = document.getElementById('batchAILabel');
+
+            // HIGH FIX: Guard against re-triggering while batch is active
+            if (batchAIInProgress || batchFetchInProgress) {
+                console.log('Batch already in progress, ignoring re-trigger');
+                return;
+            }
+
+            // Collect all segments with issues (excluding deleted segments)
+            const issueCards = document.querySelectorAll('.subtitle-card:not([data-deleted="true"]).has-error, .subtitle-card:not([data-deleted="true"]).has-warning');
+
+            if (issueCards.length === 0) {
+                alert('No issues found to fix!');
+                return;
+            }
+
+            // Collect segment data BEFORE confirmation (to validate)
+            const segmentsToFix = [];
+            let skippedEmpty = 0;
+            issueCards.forEach(card => {
+                const index = parseInt(card.dataset.index);
+                const textarea = card.querySelector('.translation-input');
+                const originalDiv = card.querySelector('.original-text');
+                const sourceText = originalDiv.textContent.trim();
+                const translatedText = textarea.value.trim();
+
+                // MEDIUM FIX: Skip segments with empty source or translation
+                if (!sourceText || !translatedText) {
+                    skippedEmpty++;
+                    console.log(`Skipping segment ${index}: empty source or translation`);
+                    return;
+                }
+
+                segmentsToFix.push({
+                    index: index,
+                    source_text: sourceText,
+                    translated_text: translatedText
+                });
+            });
+
+            if (segmentsToFix.length === 0) {
+                alert(`No valid segments to process (${skippedEmpty} skipped due to empty text).`);
+                return;
+            }
+
+            // Confirm with user (show skipped count if any)
+            const skipMsg = skippedEmpty > 0 ? ` (${skippedEmpty} skipped - empty text)` : '';
+            if (!confirm(`Get AI suggestions for ${segmentsToFix.length} segments with issues?${skipMsg}`)) {
+                return;
+            }
+
+            // Now set flags AFTER confirmation
+            batchFetchInProgress = true;
+            batchSuggestionQueue = [];
+            batchCurrentIndex = 0;
+            batchTotalCount = segmentsToFix.length;
+
+            // Update button to show progress
+            btn.disabled = true;
+            label.textContent = `Processing 0/${batchTotalCount}...`;
+
+            // Process in batches of 5 (parallel requests)
+            const BATCH_SIZE = 5;
+            for (let i = 0; i < segmentsToFix.length; i += BATCH_SIZE) {
+                const batch = segmentsToFix.slice(i, i + BATCH_SIZE);
+
+                // Fire parallel requests
+                const promises = batch.map(seg => fetchSuggestionForSegment(seg));
+                const results = await Promise.all(promises);
+
+                // Store successful suggestions
+                results.forEach((result, idx) => {
+                    if (result && result.suggestion) {
+                        batchSuggestionQueue.push({
+                            index: batch[idx].index,
+                            suggestion: result
+                        });
+                        pendingSuggestions.set(batch[idx].index, result);
+                    }
+                });
+
+                // Update progress
+                const processed = Math.min(i + BATCH_SIZE, segmentsToFix.length);
+                label.textContent = `Processing ${processed}/${batchTotalCount}...`;
+            }
+
+            // Done fetching - transition from fetch phase to review phase
+            batchFetchInProgress = false;
+            btn.disabled = false;
+
+            if (batchSuggestionQueue.length === 0) {
+                label.textContent = 'Fix All with AI';
+                alert('No suggestions generated. AI may be unavailable.');
+                return;
+            }
+
+            // Enter batch review mode
+            batchAIInProgress = true;
+
+            // Show batch results UI
+            label.textContent = `${batchSuggestionQueue.length} suggestions ready`;
+            showBatchResultsBar();
+        }
+
+        async function fetchSuggestionForSegment(segment) {
+            try {
+                const response = await fetch('/api/segment/suggest', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        source_text: segment.source_text,
+                        translated_text: segment.translated_text,
+                        target_language: '{{ job.target_language }}',
+                        context: {}
+                    })
+                });
+                const data = await response.json();
+                if (data.available && data.suggestion) {
+                    return data;
+                }
+                return null;
+            } catch (e) {
+                console.error('Batch suggestion error:', e);
+                return null;
+            }
+        }
+
+        function showBatchResultsBar() {
+            // Create or show batch results bar
+            let bar = document.getElementById('batchResultsBar');
+            if (!bar) {
+                bar = document.createElement('div');
+                bar.id = 'batchResultsBar';
+                bar.className = 'batch-results-bar';
+                bar.innerHTML = `
+                    <span class="batch-count" id="batchCount">${batchSuggestionQueue.length} suggestions</span>
+                    <button class="btn btn-secondary btn-small" onclick="reviewBatchOne()">Review One by One</button>
+                    <button class="btn btn-primary btn-small" onclick="acceptAllBatch()">Accept All</button>
+                    <button class="btn btn-secondary btn-small" onclick="cancelBatch()">Cancel</button>
+                `;
+                document.body.appendChild(bar);
+            } else {
+                document.getElementById('batchCount').textContent = `${batchSuggestionQueue.length} suggestions`;
+                bar.style.display = 'flex';
+            }
+        }
+
+        function hideBatchResultsBar() {
+            const bar = document.getElementById('batchResultsBar');
+            if (bar) bar.style.display = 'none';
+            batchAIInProgress = false;
+            batchFetchInProgress = false;  // Reset both flags
+            document.getElementById('batchAILabel').textContent = 'Fix All with AI';
+        }
+
+        function reviewBatchOne() {
+            if (batchSuggestionQueue.length === 0) {
+                hideBatchResultsBar();
+                return;
+            }
+
+            // Show first suggestion inline
+            batchCurrentIndex = 0;
+            showNextBatchSuggestion();
+        }
+
+        function showNextBatchSuggestion() {
+            // Find next unprocessed suggestion
+            while (batchCurrentIndex < batchSuggestionQueue.length) {
+                const item = batchSuggestionQueue[batchCurrentIndex];
+                if (pendingSuggestions.has(item.index)) {
+                    // Show this one
+                    const card = document.querySelector(`.subtitle-card[data-index="${item.index}"]`);
+                    const textarea = card.querySelector('.translation-input');
+                    showInlineSuggestion(item.index, textarea.value, item.suggestion);
+
+                    // Update count
+                    const remaining = batchSuggestionQueue.length - batchCurrentIndex;
+                    document.getElementById('batchCount').textContent = `${remaining} remaining`;
+
+                    batchCurrentIndex++;
+                    return;
+                }
+                batchCurrentIndex++;
+            }
+
+            // All done
+            hideBatchResultsBar();
+            alert('All suggestions reviewed!');
+        }
+
+        function acceptAllBatch() {
+            if (!confirm(`Apply all ${batchSuggestionQueue.length} AI suggestions?`)) {
+                return;
+            }
+
+            let applied = 0;
+            batchSuggestionQueue.forEach(item => {
+                const suggestion = pendingSuggestions.get(item.index);
+                if (suggestion) {
+                    const card = document.querySelector(`.subtitle-card[data-index="${item.index}"]`);
+                    const textarea = card.querySelector('.translation-input');
+                    textarea.value = suggestion.suggestion;
+                    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+                    pendingSuggestions.delete(item.index);
+
+                    // LOW FIX: Clean up inline suggestion UI for this card
+                    const container = document.getElementById(`inline-suggestion-${item.index}`);
+                    if (container) {
+                        container.style.display = 'none';
+                        container.classList.remove('suggestion-visible');
+                        container.removeAttribute('data-suggestion-visible');
+                    }
+                    card.classList.remove('has-suggestion');
+
+                    applied++;
+                }
+            });
+
+            hasUnsavedChanges = true;
+            batchSuggestionQueue = [];
+
+            // Also hide any remaining inline suggestions (defensive cleanup)
+            hideAllInlineSuggestions();
+
+            hideBatchResultsBar();
+
+            // Re-run validation
+            runInitialValidation();
+
+            alert(`Applied ${applied} suggestions. Don't forget to save!`);
+        }
+
+        function cancelBatch() {
+            pendingSuggestions.clear();
+            batchSuggestionQueue = [];
+            hideAllInlineSuggestions();
+            hideBatchResultsBar();
+        }
+
+        // Legacy modal functions (kept for backwards compatibility)
+        function showAIModal(original, current, suggestion) {
+            document.getElementById('aiOriginalText').textContent = original;
+            document.getElementById('aiCurrentText').textContent = current;
+            document.getElementById('aiSuggestionText').textContent = suggestion.suggestion;
+            document.getElementById('aiReasoning').textContent = suggestion.reasoning;
+
+            const confidence = Math.round(suggestion.confidence * 100);
+            document.getElementById('aiConfidenceFill').style.width = confidence + '%';
+            document.getElementById('aiConfidenceText').textContent = confidence + '%';
+
+            const fill = document.getElementById('aiConfidenceFill');
+            if (confidence >= 80) {
+                fill.style.background = '#10b981';
+            } else if (confidence >= 60) {
+                fill.style.background = '#f59e0b';
+            } else {
+                fill.style.background = '#ef4444';
+            }
+
+            document.getElementById('aiModal').classList.add('show');
+        }
+
+        function closeAIModal() {
+            document.getElementById('aiModal').classList.remove('show');
+            currentAISegmentIndex = null;
+            currentAISuggestion = null;
+        }
+
+        function acceptAISuggestion() {
+            if (currentAISegmentIndex === null || !currentAISuggestion) {
+                return;
+            }
+
+            const card = document.querySelector(`.subtitle-card[data-index="${currentAISegmentIndex}"]`);
+            const textarea = card.querySelector('.translation-input');
+            textarea.value = currentAISuggestion.suggestion;
+            textarea.dispatchEvent(new Event('input', { bubbles: true }));
+            logAIFeedback(currentAISegmentIndex, 'accept');
+            closeAIModal();
+        }
+
+        async function logAIFeedback(index, action) {
+            console.log('AI feedback:', action, 'for segment', index);
+        }
+
+        // Validate segment on blur
+        async function validateSegment(index) {
+            const card = document.querySelector(`.subtitle-card[data-index="${index}"]`);
+            const textarea = card.querySelector('.translation-input');
+            const badge = document.getElementById(`quality-badge-${index}`);
+
+            // Get segment data
+            const segments = collectSegments();
+            const segment = segments[index];
+
+            if (!segment || !segment.text) {
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/segment/validate', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(segment)
+                });
+
+                const data = await response.json();
+
+                if (data.issues && data.issues.length > 0) {
+                    // Show worst issue
+                    const errors = data.issues.filter(i => i.severity === 'error');
+                    const warnings = data.issues.filter(i => i.severity === 'warning');
+
+                    if (errors.length > 0) {
+                        badge.textContent = '❌';
+                        badge.title = errors[0].message;
+                        badge.className = 'quality-badge error';
+                    } else if (warnings.length > 0) {
+                        badge.textContent = '⚠️';
+                        badge.title = warnings[0].message;
+                        badge.className = 'quality-badge warning';
+                    } else {
+                        badge.textContent = 'ℹ️';
+                        badge.title = data.issues[0].message;
+                        badge.className = 'quality-badge info';
+                    }
+
+                    badge.style.display = 'inline-block';
+                } else {
+                    // No issues - hide badge
+                    badge.style.display = 'none';
+                }
+            } catch (error) {
+                console.error('Validation error:', error);
+            }
+        }
+
+        // Add validation to textareas
+        document.addEventListener('DOMContentLoaded', () => {
+            const textareas = document.querySelectorAll('.translation-input');
+            textareas.forEach((textarea, index) => {
+                textarea.addEventListener('blur', () => {
+                    validateSegment(index);
+                });
+            });
+
+            // Run initial validation on page load
+            runInitialValidation();
+        });
+
+        // Toggle suggestions visibility
+        function toggleSuggestions() {
+            const content = document.getElementById('suggestionContent');
+            const btn = document.getElementById('toggleSuggestionsBtn');
+            if (content.style.display === 'none') {
+                content.style.display = 'block';
+                btn.textContent = 'Hide';
+            } else {
+                content.style.display = 'none';
+                btn.textContent = 'Show';
+            }
+        }
+
+        // Run validation on all segments on page load
+        async function runInitialValidation() {
+            try {
+                const response = await fetch(`/api/job/${jobId}/validate`);
+                const data = await response.json();
+
+                if (data.error) {
+                    console.error('Validation error:', data.error);
+                    return;
+                }
+
+                // Update quality score in header
+                updateQualityDisplay(data);
+
+                // Apply issues to individual segments with enhanced visual indicators
+                data.issues.forEach(issue => {
+                    const badge = document.getElementById(`quality-badge-${issue.segment_index}`);
+                    const card = document.querySelector(`.subtitle-card[data-index="${issue.segment_index}"]`);
+
+                    if (badge) {
+                        // Set badge icon and base class
+                        if (issue.severity === 'error') {
+                            badge.textContent = '❌';
+                            badge.className = 'quality-badge error';
+                        } else if (issue.severity === 'warning') {
+                            badge.textContent = '⚠️';
+                            badge.className = 'quality-badge warning';
+                        } else {
+                            badge.textContent = 'ℹ️';
+                            badge.className = 'quality-badge info';
+                        }
+
+                        // Add issue-type specific class for enhanced styling
+                        if (issue.type === 'cps') {
+                            badge.classList.add('cps-error');
+                        } else if (issue.type === 'name_variation') {
+                            badge.classList.add('name-variation');
+                        } else if (issue.type === 'duplicate') {
+                            badge.classList.add('duplicate');
+                        }
+
+                        // Show suggestion in tooltip if available
+                        badge.title = issue.suggestion
+                            ? `${issue.message}\n💡 ${issue.suggestion}`
+                            : issue.message;
+                        badge.style.display = 'inline-block';
+                    }
+
+                    // Highlight card based on issue type
+                    if (card) {
+                        if (issue.severity === 'error') {
+                            card.classList.add('has-error');
+                            if (issue.type === 'cps') {
+                                card.classList.add('has-cps-error');
+                            }
+                        } else if (issue.severity === 'warning') {
+                            card.classList.add('has-warning');
+                            if (issue.type === 'name_variation') {
+                                card.classList.add('has-name-issue');
+                            }
+                        }
+                    }
+                });
+
+                console.log(`Initial validation complete: ${data.error_count} errors, ${data.warning_count} warnings`);
+            } catch (error) {
+                console.error('Failed to run initial validation:', error);
+            }
+        }
+
+        // Update quality display in header
+        function updateQualityDisplay(data) {
+            // Add quality score indicator to header if not already present
+            let qualityIndicator = document.getElementById('liveQualityIndicator');
+            if (!qualityIndicator) {
+                qualityIndicator = document.createElement('div');
+                qualityIndicator.id = 'liveQualityIndicator';
+                qualityIndicator.className = 'live-quality-indicator';
+                const headerRight = document.querySelector('.header-right');
+                if (headerRight) {
+                    headerRight.insertBefore(qualityIndicator, headerRight.firstChild);
+                }
+            }
+
+            const score = data.quality_score;
+            const scoreClass = score >= 90 ? 'excellent' : (score >= 70 ? 'good' : 'fair');
+            qualityIndicator.innerHTML = `
+                <span class="quality-score ${scoreClass}">${score.toFixed(0)}%</span>
+                <span class="quality-details">
+                    ${data.error_count > 0 ? `<span class="quality-errors">${data.error_count} errors</span>` : ''}
+                    ${data.warning_count > 0 ? `<span class="quality-warnings-count">${data.warning_count} warnings</span>` : ''}
+                </span>
+            `;
+
+            // Store issue counts for issue summary banner
+            window.validationData = data;
+            updateIssueSummary();
+        }
+
+        // =============================================================================
+        // Issues-Only Mode & Navigation
+        // =============================================================================
+
+        let issuesOnlyMode = false;
+        let issueSegmentIndices = [];
+        let currentIssueIndex = -1;
+        let resolvedIssues = new Set();
+
+        function toggleIssuesOnly() {
+            issuesOnlyMode = !issuesOnlyMode;
+            const btn = document.getElementById('issuesOnlyBtn');
+            const label = document.getElementById('issuesOnlyLabel');
+            const navHint = document.getElementById('issueNavHint');
+            const issueNav = document.getElementById('issueNavigation');
+            const summaryBanner = document.getElementById('issueSummaryBanner');
+
+            if (issuesOnlyMode) {
+                btn.classList.add('active');
+                label.textContent = 'Show All';
+                navHint.style.display = 'inline';
+                issueNav.style.display = 'flex';
+                summaryBanner.style.display = 'block';
+                filterToIssuesOnly();
+            } else {
+                btn.classList.remove('active');
+                label.textContent = 'Show Issues Only';
+                navHint.style.display = 'none';
+                issueNav.style.display = 'none';
+                summaryBanner.style.display = 'none';
+                showAllSubtitles();
+            }
+        }
+
+        function filterToIssuesOnly() {
+            // Hide any open inline suggestions when changing view mode
+            hideAllInlineSuggestions();
+
+            const cards = document.querySelectorAll('.subtitle-card:not([data-deleted="true"])');
+            issueSegmentIndices = [];
+
+            cards.forEach(card => {
+                const hasError = card.classList.contains('has-error');
+                const hasWarning = card.classList.contains('has-warning');
+                const index = parseInt(card.dataset.index);
+
+                if (hasError || hasWarning) {
+                    card.style.display = '';
+                    card.classList.add('issue-visible');
+                    issueSegmentIndices.push(index);
+                } else {
+                    card.style.display = 'none';
+                    card.classList.remove('issue-visible');
+                }
+            });
+
+            // Update navigation position
+            currentIssueIndex = issueSegmentIndices.length > 0 ? 0 : -1;
+            updateIssueNavigation();
+
+            // Scroll to first issue
+            if (issueSegmentIndices.length > 0) {
+                navigateToIssue(0);
+            }
+        }
+
+        function showAllSubtitles() {
+            const cards = document.querySelectorAll('.subtitle-card:not([data-deleted="true"])');
+            cards.forEach(card => {
+                card.style.display = '';
+                card.classList.remove('issue-visible');
+            });
+            currentIssueIndex = -1;
+        }
+
+        function navigateIssue(direction) {
+            if (issueSegmentIndices.length === 0) return;
+
+            currentIssueIndex += direction;
+            if (currentIssueIndex < 0) {
+                currentIssueIndex = issueSegmentIndices.length - 1;
+            } else if (currentIssueIndex >= issueSegmentIndices.length) {
+                currentIssueIndex = 0;
+            }
+
+            navigateToIssue(currentIssueIndex);
+        }
+
+        function navigateToIssue(issueIndex) {
+            const segmentIndex = issueSegmentIndices[issueIndex];
+            const card = document.querySelector(`.subtitle-card[data-index="${segmentIndex}"]`);
+
+            if (card) {
+                // Remove highlight from previous
+                document.querySelectorAll('.subtitle-card.current-issue').forEach(c => {
+                    c.classList.remove('current-issue');
+                });
+
+                // Highlight current
+                card.classList.add('current-issue');
+                card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+                // Focus the textarea
+                const textarea = card.querySelector('.translation-input');
+                if (textarea) textarea.focus();
+
+                updateIssueNavigation();
+            }
+        }
+
+        function updateIssueNavigation() {
+            const positionEl = document.getElementById('issuePosition');
+            if (issueSegmentIndices.length === 0) {
+                positionEl.textContent = '0 / 0';
+            } else {
+                positionEl.textContent = `${currentIssueIndex + 1} / ${issueSegmentIndices.length}`;
+            }
+        }
+
+        function updateIssueSummary() {
+            const data = window.validationData;
+            if (!data) return;
+
+            const errorCount = data.error_count || 0;
+            const warningCount = data.warning_count || 0;
+            const totalIssues = errorCount + warningCount;
+            const resolvedCount = resolvedIssues.size;
+
+            // Update counts
+            document.querySelector('#summaryErrorCount .count-value').textContent = errorCount;
+            document.querySelector('#summaryWarningCount .count-value').textContent = warningCount;
+            document.querySelector('#summaryResolvedCount .count-value').textContent = resolvedCount;
+
+            // Update progress bar
+            const progress = totalIssues > 0 ? (resolvedCount / totalIssues) * 100 : 100;
+            document.getElementById('issueProgressFill').style.width = progress + '%';
+            document.getElementById('issueProgressText').textContent = `${Math.round(progress)}% complete`;
+        }
+
+        // Mark issue as resolved when segment is approved
+        function markIssueResolved(segmentIndex) {
+            resolvedIssues.add(segmentIndex);
+            updateIssueSummary();
+
+            // Update card styling
+            const card = document.querySelector(`.subtitle-card[data-index="${segmentIndex}"]`);
+            if (card) {
+                card.classList.add('issue-resolved');
+            }
+        }
+
+        // =============================================================================
+        // Live CPS Indicator
+        // =============================================================================
+
+        function updateCPSIndicator(textarea) {
+            const index = textarea.dataset.index;
+            const indicator = document.getElementById(`cps-indicator-${index}`);
+            if (!indicator) return;
+
+            const text = textarea.value;
+            const charCount = text.length;
+            const startStr = textarea.dataset.start;
+            const endStr = textarea.dataset.end;
+
+            const startSec = parseTimeToSeconds(startStr);
+            const endSec = parseTimeToSeconds(endStr);
+            const duration = endSec - startSec;
+
+            const cpsValue = indicator.querySelector('.cps-value');
+            const charCountEl = indicator.querySelector('.char-count');
+
+            charCountEl.textContent = `${charCount} chars`;
+
+            if (duration > 0) {
+                const cps = charCount / duration;
+                cpsValue.textContent = `${cps.toFixed(1)} CPS`;
+
+                // Color code based on CPS
+                indicator.classList.remove('cps-good', 'cps-warning', 'cps-danger');
+                if (cps <= 20) {
+                    indicator.classList.add('cps-good');
+                } else if (cps <= 25) {
+                    indicator.classList.add('cps-warning');
+                } else {
+                    indicator.classList.add('cps-danger');
+                }
+            } else {
+                cpsValue.textContent = '-- CPS';
+                indicator.classList.remove('cps-good', 'cps-warning', 'cps-danger');
+            }
+        }
+
+        // Initialize CPS indicators
+        function initCPSIndicators() {
+            document.querySelectorAll('.translation-input').forEach(textarea => {
+                updateCPSIndicator(textarea);
+                textarea.addEventListener('input', () => updateCPSIndicator(textarea));
+            });
+        }
+
+        // =============================================================================
+        // Enhanced Keyboard Navigation
+        // =============================================================================
+
+        function setupEnhancedKeyboardShortcuts() {
+            document.addEventListener('keydown', (e) => {
+                // Handle inline AI suggestion shortcuts first
+                // BUT only if user is NOT typing in a textarea or input
+                // LOW FIX: Use data attribute for reliable visibility detection (not style matching)
+                const activeSuggestion = document.querySelector('.inline-suggestion[data-suggestion-visible="true"]');
+                const isTyping = e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT';
+
+                if (activeSuggestion && !isTyping) {
+                    const index = parseInt(activeSuggestion.id.replace('inline-suggestion-', ''));
+
+                    // Enter accepts suggestion (only when not in text field)
+                    if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey) {
+                        e.preventDefault();
+                        acceptInlineSuggestion(index);
+                        return;
+                    }
+
+                    // Escape rejects suggestion
+                    if (e.key === 'Escape') {
+                        e.preventDefault();
+                        rejectInlineSuggestion(index);
+                        return;
+                    }
+                }
+
+                // In issues-only mode, Tab navigates issues
+                if (issuesOnlyMode && e.key === 'Tab') {
+                    e.preventDefault();
+                    if (e.shiftKey) {
+                        navigateIssue(-1);
+                    } else {
+                        navigateIssue(1);
+                    }
+                    return;
+                }
+
+                // Escape exits issues-only mode (only if no active suggestion)
+                if (e.key === 'Escape' && issuesOnlyMode && !activeSuggestion) {
+                    toggleIssuesOnly();
+                    return;
+                }
+
+                // In textarea
+                if (e.target.tagName === 'TEXTAREA') {
+                    const index = parseInt(e.target.dataset.index);
+
+                    // Cmd/Ctrl+Enter approves and moves to next
+                    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                        e.preventDefault();
+                        approveOne(index);
+                        if (issuesOnlyMode) {
+                            markIssueResolved(index);
+                        }
+                    }
+
+                    // Alt+Down/Up navigates segments
+                    if (e.altKey && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+                        e.preventDefault();
+                        const direction = e.key === 'ArrowDown' ? 1 : -1;
+                        navigateSegment(index, direction);
+                    }
+
+                    return;
+                }
+
+                // Global shortcuts
+                if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+                    e.preventDefault();
+                    saveDraft();
+                }
+
+                // I key toggles issues-only mode
+                if (e.key === 'i' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+                    toggleIssuesOnly();
+                }
+            });
+        }
+
+        function navigateSegment(currentIndex, direction) {
+            let targetIndex = currentIndex + direction;
+            const cards = document.querySelectorAll('.subtitle-card:not([data-deleted="true"])');
+            const indices = Array.from(cards).map(c => parseInt(c.dataset.index));
+
+            // Find next visible segment
+            while (targetIndex >= 0 && targetIndex < totalCount) {
+                const card = document.querySelector(`.subtitle-card[data-index="${targetIndex}"]`);
+                if (card && card.style.display !== 'none') {
+                    const textarea = card.querySelector('.translation-input');
+                    if (textarea) {
+                        textarea.focus();
+                        card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    }
+                    return;
+                }
+                targetIndex += direction;
+            }
+        }
+
+        // Override original keyboard shortcuts setup
+        function setupKeyboardShortcuts() {
+            setupEnhancedKeyboardShortcuts();
+        }
+
+        // =============================================================================
+        // Context Window (Adjacent Subtitles)
+        // =============================================================================
+
+        function showContextWindow(segmentIndex) {
+            const contextWindow = document.getElementById('contextWindow');
+            const contextContent = document.getElementById('contextWindowContent');
+            const shortcutsHint = document.getElementById('shortcutsHint');
+
+            // Build context: ±2 segments by reading from DOM
+            const range = 2;
+            const startIdx = Math.max(0, segmentIndex - range);
+            const endIdx = Math.min(totalCount - 1, segmentIndex + range);
+
+            let html = '';
+            for (let i = startIdx; i <= endIdx; i++) {
+                const card = document.querySelector(`.subtitle-card[data-index="${i}"]`);
+                if (!card) continue;
+
+                const isCurrent = i === segmentIndex;
+                const isPrevious = i < segmentIndex;
+                const posClass = isCurrent ? 'current' : (isPrevious ? 'previous' : 'next');
+
+                const timestamp = card.querySelector('.timestamp');
+                const textarea = card.querySelector('.translation-input');
+                const original = card.querySelector('.original-text');
+
+                const timeText = timestamp ? timestamp.textContent.trim() : '';
+                const translationText = textarea ? textarea.value.trim() : '';
+                const originalText = original ? original.textContent.trim() : '';
+                const displayText = translationText || originalText || '(empty)';
+
+                html += `
+                    <div class="context-segment ${posClass}">
+                        <div class="context-segment-time">${timeText}</div>
+                        <div class="context-segment-text">${displayText.substring(0, 100)}${displayText.length > 100 ? '...' : ''}</div>
+                    </div>
+                `;
+            }
+
+            contextContent.innerHTML = html;
+            contextWindow.classList.add('show');
+            shortcutsHint.style.display = 'block';
+        }
+
+        function hideContextWindow() {
+            document.getElementById('contextWindow').classList.remove('show');
+            document.getElementById('shortcutsHint').style.display = 'none';
+        }
+
+        // Show context window when navigating to an issue
+        const originalNavigateToIssue = navigateToIssue;
+        navigateToIssue = function(issueIndex) {
+            const segmentIndex = issueSegmentIndices[issueIndex];
+            showContextWindow(segmentIndex);
+            originalNavigateToIssue(issueIndex);
+        };
+
+        // =============================================================================
+        // One-Click Fix Functions
+        // =============================================================================
+
+        async function fixExtendTiming(index, direction = 'end', amount = 500) {
+            const card = document.querySelector(`.subtitle-card[data-index="${index}"]`);
+            if (!card) return;
+
+            try {
+                const response = await fetch(`/api/job/${jobId}/fix/extend`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        segment_index: index,
+                        direction: direction,
+                        amount_ms: amount
+                    })
+                });
+
+                const data = await response.json();
+                if (!data.success) {
+                    alert('Fix failed: ' + (data.error || 'Unknown error'));
+                    return;
+                }
+
+                // Update the textarea with new timing data attributes
+                const textarea = card.querySelector('.translation-input');
+                if (textarea) {
+                    textarea.dataset.start = data.new_start;
+                    textarea.dataset.end = data.new_end;
+                    updateCPSIndicator(textarea);
+                }
+
+                // Update timestamp display
+                const timestamp = card.querySelector('.timestamp');
+                if (timestamp) {
+                    timestamp.textContent = `${data.new_start} → ${data.new_end}`;
+                }
+
+                // Mark as changed
+                hasUnsavedChanges = true;
+
+                // Show success feedback
+                showFixFeedback(card, `Extended ${direction} by ${amount}ms → ${data.new_cps} CPS`);
+
+            } catch (error) {
+                console.error('Extend fix error:', error);
+                alert('Failed to extend timing: ' + error.message);
+            }
+        }
+
+        async function fixShortenText(index) {
+            const card = document.querySelector(`.subtitle-card[data-index="${index}"]`);
+            if (!card) return;
+
+            // Show loading state
+            const textarea = card.querySelector('.translation-input');
+            const originalText = textarea.value;
+            textarea.disabled = true;
+
+            try {
+                const response = await fetch(`/api/job/${jobId}/fix/shorten`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        segment_index: index,
+                        target_cps: 20
+                    })
+                });
+
+                const data = await response.json();
+                textarea.disabled = false;
+
+                if (!data.success) {
+                    alert('Fix failed: ' + (data.error || 'Unknown error'));
+                    return;
+                }
+
+                // Show confirmation before applying
+                if (confirm(`Shorten suggestion:\n\nOriginal (${data.original_chars} chars):\n${data.original_text}\n\nShortened (${data.new_chars} chars):\n${data.shortened_text}\n\nReason: ${data.reasoning}\n\nApply this change?`)) {
+                    textarea.value = data.shortened_text;
+                    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+                    hasUnsavedChanges = true;
+                    showFixFeedback(card, `Shortened to ${data.new_cps} CPS`);
+                }
+
+            } catch (error) {
+                textarea.disabled = false;
+                console.error('Shorten fix error:', error);
+                alert('Failed to get shortened text: ' + error.message);
+            }
+        }
+
+        function showFixFeedback(card, message) {
+            // Create temporary feedback element
+            const feedback = document.createElement('div');
+            feedback.className = 'fix-feedback';
+            feedback.textContent = message;
+            feedback.style.cssText = `
+                position: absolute;
+                top: 8px;
+                right: 8px;
+                background: rgba(78, 201, 176, 0.9);
+                color: #000;
+                padding: 4px 8px;
+                border-radius: 4px;
+                font-size: 11px;
+                font-weight: 600;
+                z-index: 10;
+                animation: fadeInOut 2s ease forwards;
+            `;
+
+            card.style.position = 'relative';
+            card.appendChild(feedback);
+
+            setTimeout(() => feedback.remove(), 2000);
+        }
+
+        // Add fix buttons dynamically to cards with CPS issues
+        function addFixButtonsToCard(card, issueType) {
+            const index = parseInt(card.dataset.index);
+            const actionsDiv = card.querySelector('.card-actions');
+
+            // Check if fix buttons already exist
+            if (card.querySelector('.fix-buttons')) return;
+
+            // Create fix buttons container
+            const fixDiv = document.createElement('div');
+            fixDiv.className = 'fix-buttons';
+
+            if (issueType === 'cps') {
+                // Add extend timing button
+                const extendBtn = document.createElement('button');
+                extendBtn.className = 'btn-fix';
+                extendBtn.innerHTML = `
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12">
+                        <polyline points="15 3 21 3 21 9"></polyline>
+                        <polyline points="9 21 3 21 3 15"></polyline>
+                        <line x1="21" y1="3" x2="14" y2="10"></line>
+                        <line x1="3" y1="21" x2="10" y2="14"></line>
+                    </svg>
+                    Extend +0.5s
+                `;
+                extendBtn.onclick = () => fixExtendTiming(index, 'end', 500);
+                fixDiv.appendChild(extendBtn);
+
+                // Add shorten text button
+                const shortenBtn = document.createElement('button');
+                shortenBtn.className = 'btn-fix';
+                shortenBtn.innerHTML = `
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                        <polyline points="7 10 12 15 17 10"></polyline>
+                        <line x1="12" y1="15" x2="12" y2="3"></line>
+                    </svg>
+                    AI Shorten
+                `;
+                shortenBtn.onclick = () => fixShortenText(index);
+                fixDiv.appendChild(shortenBtn);
+            }
+
+            // Insert before card actions
+            actionsDiv.parentNode.insertBefore(fixDiv, actionsDiv);
+        }
+
+        // After initial validation, add fix buttons to problem cards
+        const originalRunInitialValidation = runInitialValidation;
+        runInitialValidation = async function() {
+            await originalRunInitialValidation();
+
+            // Add fix buttons to CPS error cards
+            document.querySelectorAll('.subtitle-card.has-cps-error').forEach(card => {
+                addFixButtonsToCard(card, 'cps');
+            });
+        };
+
+        // =============================================================================
+        // Bulk Selection Functions
+        // =============================================================================
+
+        let selectedSegments = new Set();
+
+        function toggleSegmentSelection(index) {
+            if (selectedSegments.has(index)) {
+                selectedSegments.delete(index);
+            } else {
+                selectedSegments.add(index);
+            }
+            updateBulkActionBar();
+        }
+
+        function updateBulkActionBar() {
+            const bar = document.getElementById('bulkActionBar');
+            const count = document.getElementById('selectionCount');
+            if (selectedSegments.size > 0) {
+                bar.style.display = 'flex';
+                count.textContent = `${selectedSegments.size} selected`;
+            } else {
+                bar.style.display = 'none';
+            }
+        }
+
+        function bulkApprove() {
+            selectedSegments.forEach(index => {
+                approveOne(index);
+            });
+            clearSelection();
+        }
+
+        function bulkFlag() {
+            selectedSegments.forEach(index => {
+                flagOne(index);
+            });
+            clearSelection();
+        }
+
+        function selectAllVisible() {
+            document.querySelectorAll('.subtitle-card:not([data-deleted="true"])').forEach(card => {
+                if (card.style.display !== 'none') {
+                    const index = parseInt(card.dataset.index);
+                    selectedSegments.add(index);
+                    card.querySelector('.segment-checkbox').checked = true;
+                }
+            });
+            updateBulkActionBar();
+        }
+
+        function clearSelection() {
+            selectedSegments.clear();
+            document.querySelectorAll('.segment-checkbox').forEach(cb => cb.checked = false);
+            updateBulkActionBar();
+        }
+
+        // =============================================================================
+        // Search & Filter Functions
+        // =============================================================================
+
+        function filterBySearch(query) {
+            const searchCount = document.getElementById('searchCount');
+            const cards = document.querySelectorAll('.subtitle-card:not([data-deleted="true"])');
+            let matchCount = 0;
+
+            if (!query.trim()) {
+                cards.forEach(card => card.style.display = '');
+                searchCount.textContent = '';
+                return;
+            }
+
+            const lowerQuery = query.toLowerCase();
+            cards.forEach(card => {
+                const textarea = card.querySelector('.translation-input');
+                const original = card.querySelector('.original-text');
+                const translationText = textarea ? textarea.value.toLowerCase() : '';
+                const originalText = original ? original.textContent.toLowerCase() : '';
+
+                if (translationText.includes(lowerQuery) || originalText.includes(lowerQuery)) {
+                    card.style.display = '';
+                    matchCount++;
+                } else {
+                    card.style.display = 'none';
+                }
+            });
+            searchCount.textContent = `${matchCount} matches`;
+        }
+
+        function clearSearch() {
+            document.getElementById('searchInput').value = '';
+            filterBySearch('');
+        }
+
+        // =============================================================================
+        // Undo/Redo System
+        // =============================================================================
+
+        const undoStack = [];
+        const redoStack = [];
+        const MAX_UNDO = 50;
+
+        function recordAction(action) {
+            undoStack.push(action);
+            if (undoStack.length > MAX_UNDO) undoStack.shift();
+            redoStack.length = 0;
+        }
+
+        function undo() {
+            if (undoStack.length === 0) return;
+            const action = undoStack.pop();
+            redoStack.push(action);
+            applyAction(action, 'undo');
+        }
+
+        function redo() {
+            if (redoStack.length === 0) return;
+            const action = redoStack.pop();
+            undoStack.push(action);
+            applyAction(action, 'redo');
+        }
+
+        function applyAction(action, direction) {
+            const card = document.querySelector(`.subtitle-card[data-index="${action.index}"]`);
+            if (!card) return;
+
+            switch (action.type) {
+                case 'edit':
+                    const textarea = card.querySelector('.translation-input');
+                    textarea.value = direction === 'undo' ? action.before : action.after;
+                    updateCPSIndicator(textarea);
+                    break;
+                case 'approve':
+                    if (direction === 'undo') {
+                        card.dataset.status = 'pending';
+                        card.classList.remove('approved');
+                    } else {
+                        approveOne(action.index);
+                    }
+                    break;
+                case 'flag':
+                    if (direction === 'undo') {
+                        card.dataset.status = 'pending';
+                        card.classList.remove('flagged');
+                    } else {
+                        flagOne(action.index);
+                    }
+                    break;
+            }
+            hasUnsavedChanges = true;
+            updateProgress();
+        }
+
+        // =============================================================================
+        // Shortcuts Modal Functions
+        // =============================================================================
+
+        function showShortcutsModal() {
+            document.getElementById('shortcutsModal').classList.add('show');
+        }
+
+        function closeShortcutsModal() {
+            document.getElementById('shortcutsModal').classList.remove('show');
+        }
+
+        // =============================================================================
+        // Auto-Advance in Issues Mode (wrap approveOne)
+        // =============================================================================
+
+        // Store reference to original approveOne
+        const baseApproveOne = approveOne;
+        approveOne = function(index) {
+            // Record for undo
+            recordAction({ type: 'approve', index });
+
+            baseApproveOne(index);
+
+            // Auto-advance in issues mode
+            if (issuesOnlyMode) {
+                markIssueResolved(index);
+                setTimeout(() => {
+                    const nextUnresolved = issueSegmentIndices.findIndex((segIdx, i) =>
+                        i > currentIssueIndex && !resolvedIssues.has(segIdx)
+                    );
+                    if (nextUnresolved !== -1) {
+                        navigateToIssue(nextUnresolved);
+                    } else {
+                        showAllIssuesResolvedMessage();
+                    }
+                }, 300);
+            }
+        };
+
+        function showAllIssuesResolvedMessage() {
+            const banner = document.getElementById('issueSummaryBanner');
+            if (banner) {
+                banner.innerHTML = `
+                    <div class="issue-summary-content" style="justify-content: center;">
+                        <span style="color: var(--success); font-weight: 600; font-size: 14px;">
+                            All issues resolved! Ready to approve.
+                        </span>
+                    </div>
+                `;
+            }
+        }
+
+        // =============================================================================
+        // Enhanced Keyboard Shortcuts (add new shortcuts)
+        // =============================================================================
+
+        // Store reference to original setupEnhancedKeyboardShortcuts
+        const baseSetupEnhancedKeyboardShortcuts = setupEnhancedKeyboardShortcuts;
+        setupEnhancedKeyboardShortcuts = function() {
+            document.addEventListener('keydown', (e) => {
+                // ? shows shortcuts modal (when not in textarea/input)
+                if (e.key === '?' && e.target.tagName !== 'TEXTAREA' && e.target.tagName !== 'INPUT') {
+                    showShortcutsModal();
+                }
+
+                // / focuses search (when not in textarea/input)
+                if (e.key === '/' && e.target.tagName !== 'TEXTAREA' && e.target.tagName !== 'INPUT') {
+                    e.preventDefault();
+                    document.getElementById('searchInput').focus();
+                }
+
+                // Cmd+Z for undo, Cmd+Shift+Z for redo
+                if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
+                    e.preventDefault();
+                    if (e.shiftKey) {
+                        redo();
+                    } else {
+                        undo();
+                    }
+                }
+
+                // Escape also closes shortcuts modal
+                if (e.key === 'Escape') {
+                    closeShortcutsModal();
+                }
+
+                // Cmd+A selects all visible (when not in textarea/input)
+                if ((e.metaKey || e.ctrlKey) && e.key === 'a' && e.target.tagName !== 'TEXTAREA' && e.target.tagName !== 'INPUT') {
+                    e.preventDefault();
+                    selectAllVisible();
+                }
+
+                // In issues-only mode, Tab navigates issues
+                if (issuesOnlyMode && e.key === 'Tab') {
+                    e.preventDefault();
+                    if (e.shiftKey) {
+                        navigateIssue(-1);
+                    } else {
+                        navigateIssue(1);
+                    }
+                    return;
+                }
+
+                // Escape exits issues-only mode
+                if (e.key === 'Escape' && issuesOnlyMode) {
+                    toggleIssuesOnly();
+                    return;
+                }
+
+                // In textarea
+                if (e.target.tagName === 'TEXTAREA') {
+                    const index = parseInt(e.target.dataset.index);
+
+                    // Cmd/Ctrl+Enter approves and moves to next
+                    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                        e.preventDefault();
+                        approveOne(index);
+                        if (issuesOnlyMode) {
+                            markIssueResolved(index);
+                        }
+                    }
+
+                    // Alt+Down/Up navigates segments
+                    if (e.altKey && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+                        e.preventDefault();
+                        const direction = e.key === 'ArrowDown' ? 1 : -1;
+                        navigateSegment(index, direction);
+                    }
+
+                    return;
+                }
+
+                // Global shortcuts
+                if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+                    e.preventDefault();
+                    saveDraft();
+                }
+
+                // I key toggles issues-only mode
+                if (e.key === 'i' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+                    toggleIssuesOnly();
+                }
+            });
+        };
+
+        // Initialize on load
+        document.addEventListener('DOMContentLoaded', () => {
+            initCPSIndicators();
+
+            // Track text changes for undo
+            document.querySelectorAll('.translation-input').forEach(textarea => {
+                let lastValue = textarea.value;
+                textarea.addEventListener('focus', () => {
+                    lastValue = textarea.value;
+                });
+                textarea.addEventListener('blur', () => {
+                    if (textarea.value !== lastValue) {
+                        recordAction({
+                            type: 'edit',
+                            index: parseInt(textarea.dataset.index),
+                            before: lastValue,
+                            after: textarea.value
+                        });
+                    }
+                });
+            });
+
+            // Show shortcuts hint briefly on first load
+            setTimeout(() => {
+                const hint = document.getElementById('shortcutsHint');
+                hint.style.display = 'block';
+                hint.style.opacity = '0.6';
+                setTimeout(() => {
+                    if (!issuesOnlyMode) {
+                        hint.style.display = 'none';
+                    }
+                }, 5000);
+            }, 2000);
+        });
+
+        // =============================================================================
+        // WAVEFORM TIMELINE
+        // =============================================================================
+
+        let wavesurfer = null;
+        let regionsPlugin = null;
+        let waveformZoom = 50;
+
+        async function initWaveform() {
+            if (wavesurfer) return; // Already initialized
+
+            // Fetch audio URL from backend
+            try {
+                const response = await fetch(`/api/job/${jobId}/audio`);
+                const data = await response.json();
+
+                if (data.error || !data.audio_url) {
+                    console.log('No audio available for waveform');
+                    return;
+                }
+
+                // Create regions plugin
+                regionsPlugin = WaveSurfer.Regions.create();
+
+                // Initialize wavesurfer
+                wavesurfer = WaveSurfer.create({
+                    container: '#waveform',
+                    waveColor: '#4a4a4a',
+                    progressColor: '#4EC9B0',
+                    cursorColor: '#fff',
+                    height: 80,
+                    normalize: true,
+                    plugins: [regionsPlugin]
+                });
+
+                // Load audio
+                wavesurfer.load(data.audio_url);
+
+                // When ready, add regions for each subtitle
+                wavesurfer.on('ready', () => {
+                    addSubtitleRegions();
+                });
+
+                // Sync playback highlight
+                wavesurfer.on('audioprocess', (time) => {
+                    highlightCurrentSubtitle(time);
+                });
+
+                // Click on waveform to seek
+                wavesurfer.on('click', (relativeX) => {
+                    const duration = wavesurfer.getDuration();
+                    const time = relativeX * duration;
+                    if (videoPlayer) {
+                        videoPlayer.setCurrentTime(time);
+                    }
+                });
+
+            } catch (error) {
+                console.error('Failed to initialize waveform:', error);
+            }
+        }
+
+        function addSubtitleRegions() {
+            if (!regionsPlugin) return;
+
+            // Clear existing regions
+            regionsPlugin.clearRegions();
+
+            // Add region for each segment
+            document.querySelectorAll('.subtitle-card:not([data-deleted="true"])').forEach(card => {
+                const index = parseInt(card.dataset.index);
+                const textarea = card.querySelector('.translation-input');
+                const start = parseTimeToSeconds(textarea.dataset.start);
+                const end = parseTimeToSeconds(textarea.dataset.end);
+                const text = textarea.value;
+                const duration = end - start;
+                const cps = duration > 0 ? text.length / duration : 0;
+
+                // Color based on CPS
+                let color;
+                if (cps <= 20) {
+                    color = 'rgba(78, 201, 176, 0.3)';  // Green
+                } else if (cps <= 25) {
+                    color = 'rgba(234, 179, 8, 0.3)';   // Yellow
+                } else {
+                    color = 'rgba(239, 68, 68, 0.3)';   // Red
+                }
+
+                regionsPlugin.addRegion({
+                    id: `segment-${index}`,
+                    start: start,
+                    end: end,
+                    color: color,
+                    drag: true,
+                    resize: true,
+                    content: text.substring(0, 15) + (text.length > 15 ? '...' : '')
+                });
+            });
+
+            // Handle region updates
+            regionsPlugin.on('region-updated', (region) => {
+                const index = parseInt(region.id.replace('segment-', ''));
+                updateSegmentTiming(index, region.start, region.end);
+            });
+
+            // Handle region click - seek video
+            regionsPlugin.on('region-clicked', (region, e) => {
+                e.stopPropagation();
+                const index = parseInt(region.id.replace('segment-', ''));
+                seekToSegment(index);
+
+                // Highlight the card
+                document.querySelectorAll('.subtitle-card').forEach(c => c.classList.remove('current-issue'));
+                const card = document.querySelector(`.subtitle-card[data-index="${index}"]`);
+                if (card) {
+                    card.classList.add('current-issue');
+                    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
+            });
+        }
+
+        function updateSegmentTiming(index, newStart, newEnd) {
+            const card = document.querySelector(`.subtitle-card[data-index="${index}"]`);
+            if (!card) return;
+
+            const textarea = card.querySelector('.translation-input');
+            textarea.dataset.start = formatTimeForDisplay(newStart);
+            textarea.dataset.end = formatTimeForDisplay(newEnd);
+
+            // Update timestamp display
+            const timestamp = card.querySelector('.timestamp');
+            timestamp.textContent = `${formatTimeForDisplay(newStart)} → ${formatTimeForDisplay(newEnd)}`;
+
+            // Update CPS indicator
+            updateCPSIndicator(textarea);
+
+            // Mark as changed
+            hasUnsavedChanges = true;
+        }
+
+        function formatTimeForDisplay(seconds) {
+            const mins = Math.floor(seconds / 60);
+            const secs = (seconds % 60).toFixed(3);
+            return `${mins}:${secs.padStart(6, '0')}`;
+        }
+
+        function highlightCurrentSubtitle(time) {
+            // Find segment at current time
+            document.querySelectorAll('.subtitle-card').forEach(card => {
+                const textarea = card.querySelector('.translation-input');
+                const start = parseTimeToSeconds(textarea.dataset.start);
+                const end = parseTimeToSeconds(textarea.dataset.end);
+
+                if (time >= start && time <= end) {
+                    card.classList.add('playing');
+                } else {
+                    card.classList.remove('playing');
+                }
+            });
+        }
+
+        function toggleWaveform() {
+            const container = document.getElementById('waveformContainer');
+            const btn = document.getElementById('waveformToggleBtn');
+
+            if (container.style.display === 'none') {
+                container.style.display = 'block';
+                if (btn) btn.textContent = '📊 Hide Timeline';
+                // Initialize waveform on first show
+                initWaveform();
+            } else {
+                container.style.display = 'none';
+                if (btn) btn.textContent = '📊 Show Timeline';
+            }
+        }
+
+        function waveformZoomIn() {
+            if (!wavesurfer) return;
+            waveformZoom = Math.min(waveformZoom + 20, 200);
+            wavesurfer.zoom(waveformZoom);
+        }
+
+        function waveformZoomOut() {
+            if (!wavesurfer) return;
+            waveformZoom = Math.max(waveformZoom - 20, 10);
+            wavesurfer.zoom(waveformZoom);
+        }
+    </script>
+</body>
+
+</html>

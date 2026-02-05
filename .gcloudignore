@@ -1,0 +1,38 @@
+# Secrets
+.env
+.omega_secrets
+service_account.json
+
+# Databases
+*.db
+*.sqlite
+
+# Runtime
+logs/
+heartbeats/
+__pycache__/
+*.pyc
+*.pyo
+
+# Local media folders
+1_INBOX/
+2_VAULT/
+3_EDITOR/
+3_TRANSLATED_DONE/
+4_DELIVERY/
+99_ERRORS/
+0_STAGE/
+0_DROPZONE/
+5_ARCHIVE/
+
+# Node (Global ignore)
+**/node_modules/
+**/.next/
+omega-frontend/node_modules/
+cloud/review_portal/frontend/node_modules/
+
+# Git
+.git/
+
+# OS
+.DS_Store

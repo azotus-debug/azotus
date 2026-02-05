@@ -1,0 +1,38 @@
+substitutions:
+  _PROJECT_ID: "sermon-translator-system"
+  _REGION: "us-central1"
+  _JOB: "omega-cloud-worker"
+  _IMAGE: "gcr.io/sermon-translator-system/omega-cloud-worker"
+
+steps:
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      [
+        "build",
+        "-t",
+        "${_IMAGE}:${SHORT_SHA}",
+        "-t",
+        "${_IMAGE}:latest",
+        "-f",
+        "cloud/Dockerfile",
+        ".",
+      ]
+  - name: "gcr.io/cloud-builders/docker"
+    args: ["push", "${_IMAGE}:${SHORT_SHA}"]
+  - name: "gcr.io/cloud-builders/docker"
+    args: ["push", "${_IMAGE}:latest"]
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    entrypoint: "gcloud"
+    args:
+      [
+        "run",
+        "jobs",
+        "update",
+        "${_JOB}",
+        "--image",
+        "${_IMAGE}:${SHORT_SHA}",
+        "--region",
+        "${_REGION}",
+        "--project",
+        "${_PROJECT_ID}",
+      ]

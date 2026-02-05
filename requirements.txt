@@ -1,0 +1,54 @@
+# Omega Pro - Python Dependencies
+# Use with: python -m venv .venv && .venv/bin/pip install -r requirements.txt
+
+# Core
+flask>=2.0.0
+gunicorn==21.2.0
+
+# Database (PostgreSQL)
+
+# Transcription
+elevenlabs>=1.0.0
+
+# Audio Processing
+soundfile>=0.12.0
+librosa>=0.10.0
+pydub>=0.25.0
+
+# Audio Classification (for Speech vs Music/Singing detection)
+# CRITICAL: These must be installed together with compatible versions
+numpy==1.26.4
+# inaSpeechSegmenter 0.7.6 requires Keras 2 (last bundled in TF 2.15)
+tensorflow-macos==2.15.0; sys_platform == 'darwin' and platform_machine == 'arm64'
+tensorflow==2.15.0; sys_platform != 'darwin' or platform_machine != 'arm64'
+keras==2.15.0
+inaSpeechSegmenter==0.7.6
+
+# Lightweight VAD (fallback, always works)
+webrtcvad==2.0.10
+
+# Vocal Extraction (Demucs)
+demucs>=4.0.0
+
+# Google Cloud
+google-cloud-storage>=2.0.0
+google-cloud-aiplatform>=1.30.0
+google-cloud-pubsub>=2.18.0
+
+# OpenAI (optional utilities)
+openai>=1.0.0
+
+# Utilities
+requests>=2.28.0
+python-dotenv>=1.0.0
+tqdm>=4.65.0
+
+# Cloud SQL
+psycopg2-binary
+cloud-sql-python-connector
+sqlalchemy>=2.0.0
+pg8000>=1.30.0
+
+# Book Translation (Omega Literati)
+pymupdf>=1.23.0  # PDF text extraction
+python-docx>=1.0.0  # DOCX text extraction

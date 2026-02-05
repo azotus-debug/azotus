@@ -1,0 +1,20 @@
+# Omega Cloud Dashboard Requirements
+# For deployment to Cloud Run
+
+# Web framework
+Flask>=2.3.0
+gunicorn>=21.0.0
+Werkzeug>=2.3.0
+
+# Database
+SQLAlchemy>=2.0.0
+pg8000>=1.29.0
+cloud-sql-python-connector>=1.0.0
+
+# Google Cloud
+google-cloud-storage>=2.10.0
+
+# Utilities
+python-dotenv>=1.0.0
+requests>=2.31.0
+openai>=1.0.0

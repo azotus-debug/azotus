@@ -1,0 +1,13 @@
+steps:
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      [
+        "build",
+        "-t",
+        "gcr.io/sermon-translator-system/omega-cloud-worker",
+        "-f",
+        "cloud/Dockerfile",
+        ".",
+      ]
+images:
+  - "gcr.io/sermon-translator-system/omega-cloud-worker"
