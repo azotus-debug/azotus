@@ -9,6 +9,7 @@ const nextConfig: NextConfig = {
   httpAgentOptions: {
     keepAlive: true,
   },
+  output: "standalone",
   async rewrites() {
     return [
       {

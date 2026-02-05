@@ -1,0 +1,46 @@
+substitutions:
+  _PROJECT_ID: "sermon-translator-system"
+  _REGION: "us-central1"
+  _JOB_NAME: "omega-frontend"
+  _IMAGE: "gcr.io/sermon-translator-system/omega-frontend"
+
+steps:
+  # Build the container image
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      [
+        "build",
+        "-t",
+        "${_IMAGE}:${SHORT_SHA}",
+        "-t",
+        "${_IMAGE}:latest",
+        "-f",
+        "omega-frontend/Dockerfile",
+        "omega-frontend", 
+      ]
+
+  # Push the container image to Container Registry
+  - name: "gcr.io/cloud-builders/docker"
+    args: ["push", "${_IMAGE}:${SHORT_SHA}"]
+  
+  - name: "gcr.io/cloud-builders/docker"
+    args: ["push", "${_IMAGE}:latest"]
+
+  # Deploy container image to Cloud Run
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    entrypoint: "gcloud"
+    args:
+      [
+        "run",
+        "deploy",
+        "${_JOB_NAME}",
+        "--image",
+        "${_IMAGE}:${SHORT_SHA}",
+        "--region",
+        "${_REGION}",
+        "--platform",
+        "managed",
+        "--allow-unauthenticated",
+        "--project",
+        "${_PROJECT_ID}",
+      ]
