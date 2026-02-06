@@ -114,6 +114,9 @@ def gcs_uri(bucket: str, blob_name: str) -> str:
     return f"gs://{bucket}/{name}"
 
 
+from google.cloud.exceptions import NotFound
+
+
 def blob_exists(client: storage.Client, bucket: str, blob_name: str) -> bool:
     breaker = get_breaker("gcs")
     if breaker.is_open():
@@ -122,12 +125,13 @@ def blob_exists(client: storage.Client, bucket: str, blob_name: str) -> bool:
         exists = client.bucket(bucket).blob(blob_name).exists(client)
         breaker.record_success()
         return exists
+    except NotFound:
+        # 404 is a valid response, not a service failure
+        breaker.record_success()
+        return False
     except Exception:
         breaker.record_failure()
         raise
-
-
-from google.cloud.exceptions import NotFound
 
 def _is_retryable(exc: Exception) -> bool:
     """Retry on all errors except 404 NotFound."""
@@ -166,6 +170,9 @@ def download_json(client: storage.Client, *, bucket: str, blob_name: str) -> Any
         payload = json.loads(raw.decode("utf-8"))
         breaker.record_success()
         return payload
+    except NotFound:
+        # 404 is expected for optional files -- don't penalize the breaker
+        raise
     except Exception:
         breaker.record_failure()
         raise

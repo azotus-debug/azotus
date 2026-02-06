@@ -606,3 +606,7 @@ OMEGA_STALL_TIMEOUTS = {
     "INGESTING": 1800.0,
     "REVIEWING": 172800.0,      # 48 hours for human review
 }
+
+# --- ZERO-TOUCH PIPELINE ---
+# If True, bypasses manual "Burn Approval" gate for jobs with review_required=True
+OMEGA_ALLOW_AUTO_BURN = os.environ.get("OMEGA_ALLOW_AUTO_BURN", "0").strip().lower() in {"1", "true", "yes", "on"}

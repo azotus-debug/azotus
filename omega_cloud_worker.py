@@ -6,6 +6,7 @@ import re
 import sys
 import time
 import datetime
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -145,38 +146,65 @@ def _is_truthy(value: object) -> bool:
 
 
 from google.api_core.exceptions import DeadlineExceeded
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+
 
 def _vertex_generate(model: GenerativeModel, *args, **kwargs):
+    """Call model.generate_content with a hard timeout that cannot block.
+
+    Previous implementation used ``with ThreadPoolExecutor`` which calls
+    ``shutdown(wait=True)`` on context-manager exit -- that blocks forever
+    when the underlying gRPC thread hangs.  This version spawns a daemon
+    thread and abandons it on timeout so the caller always returns/raises
+    within the deadline.
+    """
     breaker = get_breaker("vertex_ai")
     if breaker.is_open():
         raise RuntimeError("Vertex AI circuit breaker is open")
-    
-    # Extract timeout, default to 30.0s
-    timeout = kwargs.pop("timeout", 30.0)
 
+    timeout = kwargs.pop("timeout", 30.0)
     max_retries = 1
+
     for attempt in range(max_retries + 1):
-        try:
-            # Wrap the blocking call in a thread to enforce timeout
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(model.generate_content, *args, **kwargs)
-                response = future.result(timeout=timeout)
-                breaker.record_success()
-                return response
-        except (FuturesTimeoutError, DeadlineExceeded):
+        result_holder: list = [None]
+        error_holder: list = [None]
+        done_event = threading.Event()
+
+        def _call():
+            try:
+                result_holder[0] = model.generate_content(*args, **kwargs)
+            except Exception as exc:
+                error_holder[0] = exc
+            finally:
+                done_event.set()
+
+        t = threading.Thread(target=_call, daemon=True)
+        t.start()
+
+        if not done_event.wait(timeout=timeout):
+            # Daemon thread is abandoned -- it will die when the process exits
             if attempt < max_retries:
-                logger.warning(f"Vertex AI timeout (attempt {attempt+1}/{max_retries+1}), retrying...")
+                logger.warning(
+                    "Vertex AI timeout (attempt %d/%d), retrying...",
+                    attempt + 1, max_retries + 1,
+                )
                 continue
             breaker.record_failure()
             raise TimeoutError(f"Vertex AI timed out after {timeout}s")
-        except Exception as e:
-            if "timeout" in str(e).lower(): # Handle potential inner timeouts
-                 if attempt < max_retries:
-                    logger.warning(f"Vertex AI timeout or error (attempt {attempt+1}/{max_retries+1}): {e}, retrying...")
-                    continue
+
+        if error_holder[0] is not None:
+            exc = error_holder[0]
+            is_timeout = isinstance(exc, DeadlineExceeded) or "timeout" in str(exc).lower()
+            if is_timeout and attempt < max_retries:
+                logger.warning(
+                    "Vertex AI timeout/error (attempt %d/%d): %s, retrying...",
+                    attempt + 1, max_retries + 1, exc,
+                )
+                continue
             breaker.record_failure()
-            raise
+            raise exc
+
+        breaker.record_success()
+        return result_holder[0]
 
 
 # Common female and male names for gender inference
@@ -198,7 +226,19 @@ MALE_NAMES = {
 }
 
 # Multimodal cache (video + optional audio)
-def _create_multimodal_cache(*, model_name: str, video_gcs_uri: str, audio_gcs_uri: Optional[str] = None) -> Any:
+def _create_multimodal_cache(
+    *,
+    model_name: str,
+    video_gcs_uri: str,
+    audio_gcs_uri: Optional[str] = None,
+    timeout: float = 120.0,
+) -> Any:
+    """Create a Vertex AI content cache with a hard timeout.
+
+    Cache creation talks to a preview API that can hang indefinitely.
+    We use the same daemon-thread pattern as ``_vertex_generate`` so the
+    caller is never blocked longer than *timeout* seconds.
+    """
     from vertexai.preview import caching
     from vertexai.generative_models import Part, Content
 
@@ -206,17 +246,35 @@ def _create_multimodal_cache(*, model_name: str, video_gcs_uri: str, audio_gcs_u
     if audio_gcs_uri:
         parts.append(Part.from_uri(mime_type="audio/wav", uri=audio_gcs_uri))
 
-    cached_content = caching.CachedContent.create(
-        model_name=model_name,
-        system_instruction=(
-            "You are a Master Translator engine with visual and aural perception. "
-            "Use the video and audio to resolve tone, deixis, and on-screen text. "
-            "Prefer audio/visual evidence when it conflicts with the transcript."
-        ),
-        contents=[Content(role="user", parts=parts)],
-        ttl=datetime.timedelta(minutes=60),
-    )
-    return cached_content
+    result_holder: list = [None]
+    error_holder: list = [None]
+    done_event = threading.Event()
+
+    def _create():
+        try:
+            result_holder[0] = caching.CachedContent.create(
+                model_name=model_name,
+                system_instruction=(
+                    "You are a Master Translator engine with visual and aural perception. "
+                    "Use the video and audio to resolve tone, deixis, and on-screen text. "
+                    "Prefer audio/visual evidence when it conflicts with the transcript."
+                ),
+                contents=[Content(role="user", parts=parts)],
+                ttl=datetime.timedelta(minutes=60),
+            )
+        except Exception as exc:
+            error_holder[0] = exc
+        finally:
+            done_event.set()
+
+    t = threading.Thread(target=_create, daemon=True)
+    t.start()
+
+    if not done_event.wait(timeout=timeout):
+        raise TimeoutError(f"Content cache creation timed out after {timeout}s")
+    if error_holder[0] is not None:
+        raise error_holder[0]
+    return result_holder[0]
 
 
 def _extract_visual_anchors(vision_data: Optional[dict]) -> Dict[str, str]:
@@ -588,6 +646,7 @@ EXCERPTS:
             prompt,
             generation_config=GenerationConfig(temperature=0.2),
             safety_settings=SAFETY_SETTINGS,
+            timeout=60,
         )
     except Exception as exc:
         logger.warning("   ⚠️ Document brief failed: %s", exc)
@@ -756,6 +815,7 @@ INPUT SEGMENTS (Translate these):
         prompt,
         generation_config=generation_config,
         safety_settings=SAFETY_SETTINGS,
+        timeout=60,
     )
 
     cleaned = _clean_model_json(getattr(response, "text", "") or "")
@@ -950,6 +1010,7 @@ INPUT:
         prompt,
         generation_config=generation_config,
         safety_settings=SAFETY_SETTINGS,
+        timeout=60,
     )
 
     cleaned = _clean_model_json(getattr(response, "text", "") or "")
@@ -1864,6 +1925,7 @@ def run_job_2step(*, bucket: str, prefix: str, job_id: str) -> None:
                         temperature=0.1,
                     ),
                     safety_settings=SAFETY_SETTINGS,
+                    timeout=60,
                 )
                 corrections, report = _parse_editor_response(getattr(editor_response, "text", "") or "")
                 break
@@ -2009,6 +2071,7 @@ def _review_chunk(
                     temperature=0.1,
                 ),
                 safety_settings=SAFETY_SETTINGS,
+                timeout=60,
             )
             text = getattr(response, "text", "") or ""
             cleaned = _clean_model_json(text)
@@ -2309,6 +2372,39 @@ def _apply_editor_corrections(
     return final_segments
 
 
+def _start_deadman_timer(bucket: str, prefix: str, job_id: str, max_seconds: int) -> threading.Timer:
+    """Last-resort safety net: force-kill the process after *max_seconds*.
+
+    Before exiting, we attempt to write a CLOUD_ERROR progress entry so the
+    dashboard shows a meaningful status instead of an empty hang.
+    """
+
+    def _kill():
+        logger.error(
+            "DEADMAN TIMER FIRED after %ds -- writing error and force-exiting",
+            max_seconds,
+        )
+        try:
+            sc = storage.Client()
+            paths = GcsJobPaths(bucket=bucket, prefix=prefix, job_id=job_id)
+            _write_progress(
+                sc,
+                paths=paths,
+                stage="CLOUD_ERROR",
+                status=f"Deadman timer: exceeded {max_seconds}s",
+                progress=0.0,
+            )
+        except Exception:
+            pass
+        os._exit(2)
+
+    timer = threading.Timer(max_seconds, _kill)
+    timer.daemon = True
+    timer.start()
+    logger.info("Deadman timer set: %ds", max_seconds)
+    return timer
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Omega cloud-first worker (GCS artifacts + Vertex).")
     parser.add_argument("--bucket", default=config.OMEGA_JOBS_BUCKET, help="GCS bucket for job artifacts")
@@ -2321,6 +2417,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(message)s",
         handlers=[logging.StreamHandler(sys.stdout)],
+    )
+
+    # Start dead-man timer (last-resort kill switch)
+    deadman_minutes = config.OMEGA_CLOUD_DEADMAN_MINUTES  # default 60
+    deadman_timer = _start_deadman_timer(
+        bucket=args.bucket,
+        prefix=args.prefix,
+        job_id=args.job_id,
+        max_seconds=deadman_minutes * 60,
     )
 
     logger.info("☁️ Omega Cloud Worker starting: job_id=%s bucket=%s", args.job_id, args.bucket)
@@ -2343,6 +2448,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             pass
         return 1
     finally:
+        deadman_timer.cancel()
         elapsed = time.time() - start
         logger.info("🏁 Done in %.1fs", elapsed)
 

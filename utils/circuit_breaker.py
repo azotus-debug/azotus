@@ -54,7 +54,7 @@ class CircuitBreaker:
 
 BREAKERS: dict[str, CircuitBreaker] = {
     "elevenlabs": CircuitBreaker("elevenlabs", failure_threshold=3, reset_timeout=300),
-    "vertex_ai": CircuitBreaker("vertex_ai", failure_threshold=5, reset_timeout=180),
+    "vertex_ai": CircuitBreaker("vertex_ai", failure_threshold=10, reset_timeout=180),
     "gcs": CircuitBreaker("gcs", failure_threshold=5, reset_timeout=120),
     "smtp": CircuitBreaker("smtp", failure_threshold=2, reset_timeout=600),
     "pubsub": CircuitBreaker("pubsub", failure_threshold=5, reset_timeout=120),

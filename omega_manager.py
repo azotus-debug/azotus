@@ -2045,10 +2045,13 @@ def process_jobs(executor):
                 cloud_run_job = getattr(config, "OMEGA_CLOUD_RUN_JOB", "").strip()
                 cloud_run_region = config.OMEGA_CLOUD_RUN_REGION
                 cloud_run_project = getattr(config, "OMEGA_CLOUD_PROJECT", "").strip() or None
+                # Fixed: Check for invalid execution values (None, empty, or "unknown" from dict access bug)
+                execution_value = meta.get("cloud_run_execution")
+                needs_trigger = execution_value in (None, "", "unknown")
                 if (
                     cloud_run_job
                     and stage == "TRANSLATING_CLOUD_SUBMITTED"
-                    and not meta.get("cloud_run_execution")
+                    and needs_trigger
                 ):
                     now = time.time()
                     attempts = int(meta.get("cloud_trigger_attempts") or 0)
@@ -2591,15 +2594,19 @@ def process_jobs(executor):
         burn_approved = bool(meta.get("burn_approved")) or (status == "Approved for Burn")
 
         if review_required and not burn_approved:
-            if status != "Waiting for Burn Approval":
-                omega_db.update_job_via_track(
-                    stem,
-                    status="Waiting for Burn Approval",
-                    progress=90.0,
-                    meta={"review_required": review_required},
-                )
-                logger.info(f"🛑 Pre-Burn Gate: Stopping {stem} (Waiting for Approval)")
-            continue
+            if config.OMEGA_ALLOW_AUTO_BURN:
+                # Zero-Touch: Bypass manual approval
+                pass 
+            else:
+                if status != "Waiting for Burn Approval":
+                    omega_db.update_job_via_track(
+                        stem,
+                        status="Waiting for Burn Approval",
+                        progress=90.0,
+                        meta={"review_required": review_required},
+                    )
+                    logger.info(f"🛑 Pre-Burn Gate: Stopping {stem} (Waiting for Approval)")
+                continue
 
         # Concurrency gate: max 2 burns at a time to prevent hardware contention (M2 Max)
         if currently_burning >= MAX_CONCURRENT_BURNS:
@@ -2623,17 +2630,23 @@ def _run_translate_cloud(skel, stem, target_language):
     ensure_google_application_credentials()
 
     # Trigger Cloud Run
-    # We use the configured Cloud Run job name
-    job_name = os.environ.get("OMEGA_CLOUD_JOB_NAME", "omega-cloud-worker")
-    region = os.environ.get("OMEGA_CLOUD_REGION", "us-central1")
+    # We use the configured Cloud Run job name (fixed: use correct env var names)
+    job_name = os.environ.get("OMEGA_CLOUD_RUN_JOB", "omega-cloud-worker")
+    region = os.environ.get("OMEGA_CLOUD_RUN_REGION", "us-central1")
+    project = os.environ.get("OMEGA_CLOUD_PROJECT") or None
+    bucket_name = config.OMEGA_JOBS_BUCKET
+    prefix = config.OMEGA_JOBS_PREFIX
 
     # We pass overrides to the job to specify which job_id to process
-    # The worker parses args: --job-id
-    args = ["--job-id", stem]
+    # Include bucket/prefix for explicit control (worker has defaults, but explicit is safer)
+    args = ["--job-id", stem, "--bucket", bucket_name, "--prefix", prefix]
+
+    logger.info(f"☁️ Cloud Run trigger: job={job_name}, region={region}, project={project or 'default'}")
 
     try:
-        execution = run_cloud_run_job(job_name=job_name, args=args, region=region, project=None)
-        execution_name = execution.name if hasattr(execution, 'name') else "unknown"
+        execution = run_cloud_run_job(job_name=job_name, args=args, region=region, project=project)
+        # Fixed: run_cloud_run_job returns a dict, not an object - use dict access
+        execution_name = execution.get("name", "unknown") if isinstance(execution, dict) else "unknown"
         logger.info(f"🚀 Triggered Cloud Run: {execution_name}")
 
         try:
@@ -2653,7 +2666,10 @@ def _run_translate_cloud(skel, stem, target_language):
             stage="TRANSLATING_CLOUD_SUBMITTED",
             status="Submitted to Cloud",
             progress=40.0,
-            meta={"cloud_run_execution": execution_name}
+            meta={
+                "cloud_run_execution": execution_name,
+                "cloud_triggered_at": datetime.now().isoformat(),
+            }
         )
     except Exception as e:
         logger.error(f"❌ Failed to trigger Cloud Run: {e}")
