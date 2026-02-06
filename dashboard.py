@@ -4896,39 +4896,7 @@ def api_translate_book(book_id):
     Returns immediately with job status.
     Translation runs in background thread.
     """
-    try:
-        from workers import book_translator
-        import threading
-
-        data = request.json or {}
-        start_chapter = data.get('start_chapter', 1)
-        end_chapter = data.get('end_chapter')
-
-        # Start translation in background thread
-        def translate_in_background():
-            try:
-                book_translator.translate_book(
-                    book_id=book_id,
-                    start_chapter=start_chapter,
-                    end_chapter=end_chapter
-                )
-            except Exception as e:
-                logger.error(f"Background translation failed for book {book_id}: {e}")
-
-        thread = threading.Thread(target=translate_in_background, daemon=True)
-        thread.start()
-
-        return jsonify({
-            "success": True,
-            "message": f"Translation started for book {book_id}",
-            "book_id": book_id,
-            "start_chapter": start_chapter,
-            "end_chapter": end_chapter
-        })
-
-    except Exception as e:
-        logger.error(f"Failed to start translation for book {book_id}: {e}")
-        return jsonify({"error": str(e)}), 500
+    return jsonify({"error": "Book translation is not yet implemented"}), 501
 
 
 @app.route('/api/v2/chapters/<chapter_id>/translate', methods=['POST'])
@@ -4942,35 +4910,7 @@ def api_translate_chapter(chapter_id):
         "force_restart": false  // optional, re-translate if already done
     }
     """
-    try:
-        from workers import book_translator
-        import threading
-
-        data = request.json or {}
-        force_restart = data.get('force_restart', False)
-
-        # Start translation in background thread
-        def translate_in_background():
-            try:
-                book_translator.translate_chapter(
-                    chapter_id=chapter_id,
-                    force_restart=force_restart
-                )
-            except Exception as e:
-                logger.error(f"Background translation failed for chapter {chapter_id}: {e}")
-
-        thread = threading.Thread(target=translate_in_background, daemon=True)
-        thread.start()
-
-        return jsonify({
-            "success": True,
-            "message": f"Translation started for chapter {chapter_id}",
-            "chapter_id": chapter_id
-        })
-
-    except Exception as e:
-        logger.error(f"Failed to start translation for chapter {chapter_id}: {e}")
-        return jsonify({"error": str(e)}), 500
+    return jsonify({"error": "Chapter translation is not yet implemented"}), 501
 
 
 @app.route('/api/v2/books/<book_id>', methods=['DELETE'])

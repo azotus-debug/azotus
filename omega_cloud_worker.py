@@ -22,7 +22,6 @@ from vertexai.generative_models import (
 
 import config
 import profiles
-from subtitle_standards import build_priority_context
 from gcp_auth import ensure_google_application_credentials
 from gcs_jobs import (
     GcsJobPaths,
@@ -756,46 +755,37 @@ GENDER AGREEMENT ({target_language_name} requires grammatical gender):
 - When unsure, prefer natural-sounding phrasing over strict gender matching.
 """
 
-    prompt = f"""
-ROLE: You are the Lead Translator for Omega TV (Professional Broadcast Subtitles).
+    prompt = f"""ROLE: Lead Translator for Omega TV — professional broadcast subtitles.
 
-SYSTEM INSTRUCTION (obey strictly):
 {system_instruction}
 
-TASK:
-1. Translate the INPUT segments into natural, spoken {target_language_name}.
-2. Ensure the translation flows smoothly across segment boundaries.
-3. Respect the TONE and KEYWORDS from the Document Brief if provided.
-4. Return ONLY a valid JSON array of objects: {{ "id": <int>, "text": <string> }}.
-5. STRICTLY preserve all IDs from the input. No extras, none missing.
+TASK: Translate the INPUT segments into natural, spoken {target_language_name}.
 
-STYLE GUIDELINES:
-- **Natural Flow**: Translate meaning, not just words. Avoid "Translationese".
-- **Conciseness**: Subtitles must be readable. Condensed phrasing is preferred over wordy literalism.
-- **Formatting**: Do NOT use ALL CAPS. Use standard sentence case.
-- **Terminlogy**: Keep proper nouns, acronyms (USA, TV, I-690), and mandated titles (ÉG ER / YO SOY) exactly as required.
+TRANSLATION PRINCIPLES:
+1. Translate MEANING, not words. Produce natural {target_language_name} a native speaker would use.
+2. Be concise. Subtitles are read quickly — prefer tight phrasing over wordy literalism.
+3. Maintain flow across segment boundaries. Each segment should read naturally after the previous one.
+4. Use standard sentence case. Never output ALL CAPS (preserve acronyms: USA, TV, I-690).
+5. Keep proper nouns, mandated titles, and glossary terms exactly as specified.
 
-CRITICAL - CONTENT PRESERVATION:
-- NEVER omit, censor, or filter any segment. This is professional broadcast news.
-- Translate ALL content exactly as provided, including references to violence, politics, or sensitive topics.
-- News content about conflicts, protests, executions, or crises must be translated faithfully.
-- Do NOT skip segments or return empty translations. Every input segment MUST have a translation.
+CONTENT PRESERVATION (strict):
+- Translate ALL segments faithfully. Never omit, censor, or skip content.
+- Every input ID must appear in your output. No extras, none missing.
 
-MULTIMODAL PRIORITY (video + audio):
-- You have access to the video/audio context cache.
-- If transcript conflicts with audio or visuals, correct it.
-- Use on-screen OCR for names, places, and scripture references.
-- Resolve deixis (“this/that/here”) using what is shown on screen.
-VISUAL CONTEXT (current scene):
+MULTIMODAL CONTEXT:
+- You have the video and audio. If the transcript conflicts with what you hear or see, trust your ears/eyes.
+- Use on-screen text (lower-thirds, graphics) for names, places, and scripture references.
+- Resolve ambiguous references ("this", "that", "here") using what is visible on screen.
 {visual_context}
 {gender_instruction}
 {brief_block}{anchors_block}{speaker_block}
-CONTINUITY CONTEXT (Preceding segments - for flow only):
+CONTINUITY (preceding translated segments — for flow and consistency only):
 {json.dumps(continuity_payload, ensure_ascii=False)}
 
-INPUT SEGMENTS (Translate these):
+INPUT SEGMENTS:
 {json.dumps(input_payload, ensure_ascii=False)}
-"""
+
+Return ONLY a JSON array: [{{"id": <int>, "text": "<translation>"}}]"""
 
     generation_config = GenerationConfig(
         response_mime_type="application/json",
@@ -1212,349 +1202,6 @@ def _write_progress(
     upload_json(storage_client, bucket=paths.bucket, blob_name=paths.progress_json(), payload=payload)
 
 
-# --- GEMINI UNIFIED PROTOCOL (CLOUD PORT) ---
-
-class VertexAIResourceHandler:
-    """Manages quotas for Vertex AI."""
-    def __init__(self):
-        self._last_request_time = 0
-        self._min_interval = 2.0
-    
-    def wait_for_quota(self):
-        now = time.time()
-        elapsed = now - self._last_request_time
-        if elapsed < self._min_interval:
-            time.sleep(self._min_interval - elapsed)
-        self._last_request_time = time.time()
-
-    def handle_error(self, e: Exception, attempt: int) -> bool:
-        err_str = str(e).lower()
-        if "429" in err_str or "quota" in err_str or "resource exhausted" in err_str:
-            wait_time = min(60, 5 * (2 ** attempt))
-            logger.warning(f"⚠️ Quota Exceeded. Waiting {wait_time}s (Attempt {attempt})...")
-            time.sleep(wait_time)
-            return True
-        return False
-
-class GeminiTranslationPipeline:
-    """
-    DEPRECATED: superseded by run_job_2step() (multimodal 2-step pipeline).
-    Kept temporarily for reference only.
-    """
-
-    def __init__(self, stem: str, target_language: str, storage_client: storage.Client, paths: GcsJobPaths):
-        self.stem = stem
-        self.target_language = target_language
-        self.storage_client = storage_client
-        self.paths = paths
-        self.resource_handler = VertexAIResourceHandler()
-        self.project_id = os.environ.get("OMEGA_CLOUD_PROJECT", config.OMEGA_CLOUD_PROJECT)
-        self.location = os.environ.get("GEMINI_LOCATION", config.GEMINI_LOCATION)
-        self.model_name = os.environ.get("MODEL_TRANSLATOR", config.MODEL_TRANSLATOR)
-        
-        # Initialize Vertex AI
-        vertexai.init(project=self.project_id, location=self.location)
-
-    def run(self, transcript_path: str, video_gcs_uri: str, vision_data: Optional[Dict] = None) -> str:
-        """Executes the full 3-step pipeline."""
-        logger.info(f"🚀 Starting ULTRA-MULTIMODAL Gemini Pipeline for {self.stem} ({self.target_language})")
-        
-        # 0. Cache Video Proxy (Instead of just audio)
-        cache_name = self._create_context_cache(video_gcs_uri)
-        if not cache_name:
-            raise RuntimeError("Failed to create Video Context Cache")
-            
-        try:
-            # 0b. Process Visual Context (if available)
-            visual_speakers = {}
-            if vision_data:
-                logger.info("👁️ Processing Visual Context...")
-                visual_speakers = self._extract_visual_speakers(vision_data)
-
-            briefing = {
-                "genre": "Broadcast",
-                "glossary_overrides": {},
-            }
-            if visual_speakers:
-                briefing["visual_speakers"] = visual_speakers
-
-            # 1. Step 1: Translation
-            draft_segments = self._step_1_translate(transcript_path, cache_name, briefing, vision_data)
-
-            # 2. Step 2: Review & Polish
-            final_output = self._step_2_edit(draft_segments, cache_name, briefing)
-
-            return final_output
-
-        finally:
-            # Cleanup Cache (Optional)
-            pass
-
-    def _step_1_translate(self, transcript_path: str, cache_name: str, briefing: Dict, vision_data: Optional[Dict] = None) -> List[Dict]:
-        logger.info("✍️ Step 1: Translation (Drafting...)")
-        
-        with open(transcript_path, 'r') as f:
-            data = json.load(f)
-            segments = data.get('segments', [])
-            
-        BATCH_SIZE = 60
-        draft_segments = []
-        glossary_str = json.dumps(briefing.get('glossary_overrides', {}), ensure_ascii=False)
-        genre = briefing.get('genre', 'Broadcast')
-        
-        # Prepare Visual Context Map (Time -> Description)
-        vision_map = {}
-        speaker_map = {}  # Time -> Speaker info
-        lower_thirds_map = {}  # Time -> Lower-third graphics info
-
-        if vision_data:
-            # Shot descriptions with transitions
-            for shot in vision_data.get('shots', []):
-                start = int(shot.get('start', 0))
-                desc = shot.get('description', '')
-                ocr = shot.get('ocr_text', '')
-                transition = shot.get('type', '')
-                vision_map[start] = {
-                    "scene": desc,
-                    "text_on_screen": ocr,
-                    "transition": transition
-                }
-
-            # Speaker positions (helps with dialogue formatting)
-            for speaker in vision_data.get('speakers', []):
-                start = int(speaker.get('start', 0))
-                count = speaker.get('count', 1)
-                positions = speaker.get('positions', [])
-                speaker_map[start] = {
-                    "count": count,
-                    "positions": positions
-                }
-
-            # Lower-thirds (graphics that affect subtitle placement)
-            for lt in vision_data.get('lower_thirds', []):
-                start = int(lt.get('start', 0))
-                desc = lt.get('description', '')
-                lower_thirds_map[start] = desc
-
-        for i in range(0, len(segments), BATCH_SIZE):
-            batch = segments[i : i + BATCH_SIZE]
-
-            # Get visual context for this batch (approximate via start time)
-            batch_start = int(batch[0].get('start', 0))
-
-            # Find closest shot description
-            current_shot = {"scene": "Unknown", "text_on_screen": "", "transition": ""}
-            for t in sorted(vision_map.keys()):
-                if t <= batch_start:
-                    current_shot = vision_map[t]
-                else:
-                    break
-
-            # Find closest speaker info
-            current_speakers = {"count": 1, "positions": []}
-            for t in sorted(speaker_map.keys()):
-                if t <= batch_start:
-                    current_speakers = speaker_map[t]
-                else:
-                    break
-
-            # Check for active lower-thirds
-            active_graphics = []
-            for t, desc in lower_thirds_map.items():
-                if t <= batch_start <= t + 10:  # Assume lower-thirds last ~10s
-                    active_graphics.append(desc)
-
-            # Build rich visual context string
-            visual_context_parts = []
-            if current_shot.get("scene"):
-                visual_context_parts.append(f"Scene: {current_shot['scene']}")
-            if current_shot.get("text_on_screen"):
-                visual_context_parts.append(f"On-screen text: {current_shot['text_on_screen']}")
-            if current_shot.get("transition"):
-                visual_context_parts.append(f"Transition: {current_shot['transition']}")
-            if current_speakers.get("count", 1) > 1:
-                visual_context_parts.append(f"Speakers on screen: {current_speakers['count']} ({', '.join(current_speakers.get('positions', []))})")
-            if active_graphics:
-                visual_context_parts.append(f"Graphics: {', '.join(active_graphics)}")
-
-            visual_context = ". ".join(visual_context_parts) if visual_context_parts else "No visual data"
-
-            visual_speakers_str = ""
-            if briefing.get('visual_speakers'):
-                 visual_speakers_str = f"Identified Speakers: {json.dumps(briefing['visual_speakers'], ensure_ascii=False)}"
-
-            prompt = f"""
-            ACT as a Professional Translator ({self.target_language}).
-            WATCH the video and TRANSLATE these segments for a {genre}.
-            
-            CONTEXT: 
-            - Glossary: {glossary_str}. 
-            - {visual_speakers_str}
-            - Visual Scene: {visual_context}
-            
-            INSTRUCTIONS:
-            1. Synchronize the translation tone with the speaker's physical intensity, facial expressions, and hand gestures.
-            2. For {self.target_language}: Use appropriate grammatical gender based on what you see on screen.
-            3. Ensure the translation 'fits' the mouth movements and rhythm of the speaker.
-            4. Output JSON list {{ "id": 123, "text": "..." }}. Preserve IDs.
-            
-            INPUT: {json.dumps(batch, ensure_ascii=False)}
-            """
-            
-            response = self._generate(prompt, cache_name)
-            try:
-                translated_batch = json.loads(self._clean_json(response))
-                draft_segments.extend(translated_batch)
-                
-                # Progress Update
-                pct = 35.0 + (35.0 * (len(draft_segments) / len(segments)))
-                _write_progress(self.storage_client, paths=self.paths, stage="CLOUD_TRANSLATING", 
-                              status=f"Step 1: Translation - Batch {i//BATCH_SIZE + 1}/{(len(segments)//BATCH_SIZE) + 1}", progress=pct)
-            except Exception as e:
-                logger.error(f"   ❌ Batch {i} Failed: {e}")
-                draft_segments.extend(batch) 
-        
-        return draft_segments
-
-    def _summarize_visuals(self, vision_data: Dict) -> str:
-        """Create a high-level summary of the video content."""
-        shots = vision_data.get('shots', [])
-        if not shots: return "No visual data available."
-        
-        # Sample every 10th shot for a quick overview
-        summary = "Video Analysis:\n"
-        for i, shot in enumerate(shots):
-            if i % 10 == 0:
-                summary += f"- [{shot['start']}s]: {shot.get('description', '')} (Text: {shot.get('ocr_text', '')})\n"
-        return summary[:2000] # Cap length
-
-    def _extract_visual_speakers(self, vision_data: Dict) -> Dict:
-        """
-        Extract identified speakers from visual data (e.g. lower thirds).
-        Returns a map of Speaker Name -> Gender/Role info.
-        """
-        visual_speakers = {}
-        # Iterate through shots to find text that looks like a name
-        # The 'lower_thirds' list from vision_scanner.py is the best source if available
-        # If not, falls back to parsing 'ocr_text' in shots
-        
-        # 1. Try explicit lower_thirds list (if structure matches)
-        if 'lower_thirds' in vision_data and isinstance(vision_data['lower_thirds'], list):
-            for item in vision_data['lower_thirds']:
-                name = item.get('name')
-                if name:
-                    visual_speakers[name] = {"gender": "unknown", "role": item.get('title', 'Guest')}
-                    
-        # 2. Fallback: Heuristic scan of shots with "Lower Third" label
-        if not visual_speakers:
-            for shot in vision_data.get('shots', []):
-                # Simple heuristic: If shot has "Lower Third" label or similar
-                labels = [l.lower() for l in shot.get('labels', [])]
-                if "lower third" in labels or "name tag" in labels or "chyron" in labels:
-                    ocr = shot.get('ocr_text', '').strip()
-                    # Assume concise text on lower third is likely a name + title
-                    # Very naive, but better than nothing for Phase 4
-                    if ocr and len(ocr) < 50 and len(ocr.split()) < 6:
-                        # Split by newline if multiple lines (Name / Title)
-                        parts = ocr.split('\n')
-                        possible_name = parts[0].strip()
-                        possible_title = parts[1].strip() if len(parts) > 1 else ""
-                        
-                        # Only accept if it looks like a name (Title Case)
-                        if possible_name and possible_name[0].isupper() and " " in possible_name:
-                             visual_speakers[possible_name] = {"gender": "unknown", "role": possible_title}
-                             
-        logger.info(f"👁️ Visual Speaker Inference found: {list(visual_speakers.keys())}")
-        return visual_speakers
-
-    def _step_2_edit(self, draft_segments: List[Dict], cache_name: str, briefing: Dict) -> str:
-        logger.info("🔥 Step 2: Review & Polish (Formatting & Tone...)")
-        
-        BATCH_SIZE = 50
-        final_segments = []
-        genre = briefing.get('genre', 'Broadcast')
-        
-        tone_instruction = "Tone: Anointed, rhythmic, punchy."
-        if genre == "News": tone_instruction = "Tone: Professional, objective."
-        elif genre == "Talk Show": tone_instruction = "Tone: Conversational."
-        
-        for i in range(0, len(draft_segments), BATCH_SIZE):
-            batch = draft_segments[i : i + BATCH_SIZE]
-            prompt = f"""
-            ACT as a Professional Subtitle Editor for a {genre}.
-            POLISH this draft translation for absolute BROADCAST QUALITY.
-            
-            AUDIO + VISUAL RHYTHM:
-            - {tone_instruction}
-            - IDENTIFY Speaker Changes: If a segment involves a new speaker or two people talking, use 'Dialogue Dashes' at the start of the line (e.g., "- Hello.\n- Hi.").
-            - Ensure dash consistency: If one line has a dash, both lines in that block should typically have a dash if they are part of a dialogue.
-            - RHYTHMIC PUNCTUATION: Use commas and periods to mirror the speaker's vocal cadence and pauses.
-            
-            TECHNICAL HARDENING (Netflix/BBC Standards):
-            - MAX 42 characters per line.
-            - MAX 2 lines per subtitle block.
-            - LINE BALANCING: Prefer two roughly equal length lines over one very long and one very short line.
-            - LINGUISTIC BREAKS: Never break lines between a preposition and its object, or an article and its noun.
-            - READING SPEED: Ensure text is concise. Strip 'padding' or 'filler' words if they don't add semantic value.
-            
-            INSTRUCTIONS:
-            1. Maintain the semantic accuracy of the draft.
-            2. Apply the technical standards above.        
-            3. Output JSON list {{ "id": 123, "text": "..." }}. Preserve IDs.
-            
-            INPUT: {json.dumps(batch, ensure_ascii=False)}
-            """
-            
-            response = self._generate(prompt, cache_name)
-            try:
-                polished_batch = json.loads(self._clean_json(response))
-                final_segments.extend(polished_batch)
-                
-                pct = 70.0 + (20.0 * (len(final_segments) / len(draft_segments)))
-                _write_progress(self.storage_client, paths=self.paths, stage="CLOUD_REVIEWING", 
-                              status=f"Step 2: Review & Polish - Batch {i//BATCH_SIZE + 1}/{(len(draft_segments)//BATCH_SIZE) + 1}", progress=pct)
-            except Exception as e:
-                logger.error(f"   ❌ Batch {i} Failed: {e}")
-                final_segments.extend(batch)
-
-        # Save to /tmp
-        output_path = f"/tmp/{self.stem}_APPROVED.json"
-        final_payload = {
-            "segments": final_segments,
-            "meta": {"pipeline": "Gemini 2-Step Pipeline", "briefing": briefing, "completed_at": datetime.datetime.now().isoformat()}
-        }
-        with open(output_path, 'w') as f:
-            json.dump(final_payload, f, indent=2, ensure_ascii=False)
-        return output_path
-
-    def _create_context_cache(self, gcs_uri: str) -> str:
-        from vertexai.preview import caching
-        from vertexai.generative_models import Part, Content
-        logger.info(f"⚡️ Caching Video Proxy: {gcs_uri}")
-        cached_content = caching.CachedContent.create(
-            model_name=self.model_name,
-            system_instruction="You are a Master Translator engine with visual 'eyes'. You watch and listen to the video to produce the most accurate, tone-perfect subtitles.",
-            contents=[Content(role="user", parts=[Part.from_uri(mime_type="video/mp4", uri=gcs_uri)])],
-            ttl=datetime.timedelta(minutes=120)
-        )
-        return cached_content.name
-
-    def _generate(self, prompt: str, cache_name: str, response_schema=None) -> str:
-        model = GenerativeModel.from_cached_content(cached_content=caching.CachedContent(name=cache_name))
-        config_gen = GenerationConfig(temperature=0.3, response_mime_type="application/json")
-        for attempt in range(1, 4):
-            try:
-                self.resource_handler.wait_for_quota()
-                response = model.generate_content(prompt, generation_config=config_gen)
-                return response.text
-            except Exception as e:
-                if not self.resource_handler.handle_error(e, attempt): raise e
-        raise RuntimeError("Max retries exceeded")
-
-    def _clean_model_json(self, text: str) -> str:
-        return text.replace("```json", "").replace("```", "").strip()
-    
-    _clean_json = _clean_model_json # Alias
 
 def run_job(*, bucket: str, prefix: str, job_id: str) -> None:
     """Entry point for Cloud Run."""
@@ -1972,7 +1619,7 @@ def _build_chunk_editor_prompt(
     chunk_index: int,
     total_chunks: int,
 ) -> str:
-    """Build a lightweight editor prompt for a single chunk (no priority_context for speed)."""
+    """Build a lightweight editor prompt for a single chunk."""
 
     # Build minimal segment payloads - just id and text
     source_payload = []
@@ -1993,23 +1640,25 @@ def _build_chunk_editor_prompt(
 
     lang_label = lang_suffix.upper()
 
-    # Language-specific rules
     if lang_label in {"ICELANDIC", "IS"}:
-        rules = """STRICT RULES:
-1. "Þú" vs "Þér": God is addressed as "Þú" (do NOT use "Þér").
-2. NO ANGLICISMS: "fyrir þig" → "vegna þín", "á eldi" → "brennandi".
-3. TERMINOLOGY: "Partners" → "Bakhjarlar", "I AM" → "ÉG ER", "Pastor" → "Prestur".
-4. CAPITALIZATION: Convert ALL CAPS to normal case (preserve acronyms like USA, TV).
-5. NATURAL PHRASING: Avoid literal "Við höfum fengið" for states; use "Það er/hefur verið"."""
+        rules = """CHECKS:
+1. God addressed as "Þú" (never "Þér"). Humans also "Þú".
+2. Anglicisms: "fyrir þig" → "vegna þín", "á eldi" → "brennandi", literal English syntax.
+3. Terminology: "Partners" → "Bakhjarlar", "I AM" → "ÉG ER", "Pastor" → "Prestur".
+4. ALL CAPS → sentence case (keep acronyms: USA, TV, ÉG ER).
+5. Natural phrasing: avoid "Við höfum fengið" for states; use "Það er/hefur verið".
+6. ASR homophones: "hole"→"hold", "Halloween"→"Hallowed" in religious context."""
     else:
-        rules = """STRICT RULES:
-1. CAPITALIZATION: Convert ALL CAPS to normal case (preserve acronyms).
-2. ASR CLEANUP: Fix obvious speech-to-text errors.
-3. NATURAL FLOW: Ensure translations sound natural, not robotic."""
+        rules = f"""CHECKS:
+1. Natural {lang_label} flow — not translated English.
+2. ALL CAPS → sentence case (preserve acronyms).
+3. ASR errors that led to wrong translations.
+4. Theological accuracy and terminology."""
 
     return f"""ROLE: Chief Editor for Omega TV (Chunk {chunk_index + 1}/{total_chunks}).
 
-TASK: Review this {lang_label} translation batch for errors.
+TASK: Review {lang_label} translation for errors. Fix only what is wrong.
+Do NOT fix line length, CPS, or formatting — that is handled by post-processing.
 
 {rules}
 
@@ -2019,9 +1668,7 @@ SOURCE (English):
 TRANSLATION ({lang_label}):
 {json.dumps(trans_payload, ensure_ascii=False)}
 
-OUTPUT: Return JSON with corrections only. Format:
-{{"corrections": [{{"id": 10, "fix": "Corrected", "reason": "Why"}}]}}
-
+OUTPUT: {{"corrections": [{{"id": 10, "fix": "Corrected", "reason": "Why"}}]}}
 Only include segments that NEED fixing. Empty array if all correct."""
 
 
@@ -2206,102 +1853,84 @@ def _run_chunked_editor_review(
 
 
 def _build_editor_prompt(*, source_segments: list[dict], translated_segments: list[dict], lang_suffix: str) -> str:
-    priority_context = build_priority_context(source_segments, translated_segments, include_tight=True)
-    if lang_suffix.upper() in {"ICELANDIC", "IS"}:
-        return f"""
-ROLE: You are the Chief Editor and Quality Control Auditor for Omega TV.
+    # Build minimal segment payloads - just id and text
+    source_payload = []
+    for seg in source_segments:
+        try:
+            seg_id = int(seg.get("id"))
+        except Exception:
+            continue
+        source_payload.append({"id": seg_id, "text": str(seg.get("text") or "").strip()})
 
-YOUR TASK:
-Review the Icelandic translation against the English source.
-You are looking for "Robot Mistakes," theological errors, and awkward phrasing.
+    trans_payload = []
+    for seg in translated_segments:
+        try:
+            seg_id = int(seg.get("id"))
+        except Exception:
+            continue
+        trans_payload.append({"id": seg_id, "text": str(seg.get("text") or "").strip()})
 
-STRICT RULES:
-1. "Þú" vs "Þér": God is addressed as "Þú" (do NOT use "Þér").
-2. NO ANGLICISMS:
-   - Reject "fyrir þig" (used for "died for you"). Use "vegna þín".
-   - Reject "á eldi" (on fire). Use "brennandi".
-   - Reject "Bless" if used for impartation. Use "Guð blessi þig".
+    lang_label = lang_suffix.upper()
+
+    if lang_label in {"ICELANDIC", "IS"}:
+        rules = """ICELANDIC-SPECIFIC CHECKS:
+1. ADDRESS FORMS: God is addressed as "Þú" (NEVER "Þér"). Humans also "Þú" (casual).
+2. ANGLICISM DETECTION (critical for Icelandic):
+   - "fyrir þig" (for you, spiritual) → "vegna þín"
+   - "á eldi" (on fire) → "brennandi"
+   - "Bless" (impartation) → "Guð blessi þig"
+   - Literal "Við höfum fengið" for states → "Það er/hefur verið"
+   - Watch for English word order leaking into Icelandic syntax.
 3. TERMINOLOGY:
-   - "Partners" -> "Bakhjarlar".
-   - "I AM" -> "ÉG ER".
-   - "Covenant" -> "Sáttmáli".
-   - "Pastor" -> "Prestur".
-4. CAPITALIZATION (Broadcast):
-   - Treat ALL CAPS as a robot mistake; convert to normal sentence case.
-   - Preserve acronyms/initialisms (USA, TV, I-690) and the mandatory title "ÉG ER".
-5. ASR CLEANUP:
-   - Fix obvious speech-to-text errors in the SOURCE when the intended word is clear.
-   - If uncertain, leave the original wording.
-6. MUSIC VS SPEECH:
-   - If the SOURCE contains spoken content (not a pure music marker), the translation must NOT be "(MUSIC)" or blank.
-7. ASR CONTEXTUAL CORRECTION:
-   - Look for homophones or contextually jarring words (e.g., "hole" vs "hold", "Halloween" vs "Hallowed" in a prayer).
-   - Correct these in the translation based on the surrounding theological or program context.
-8. NATURAL PHRASING:
-   - Avoid literal "We have gotten" (Við höfum fengið) for weather or states; prefer existential "það er/hefur verið" (there is/has been).
-9. TECHNICAL CONSTRAINTS (Broadcast):
-   - Each segment has max 2 lines (<=42 chars each; <=84 total).
-   - Use the provided `effective_duration`, `gap_to_next`, and `current_cps` to keep CPS <= 17.
-   - If status is TIGHT, shorten only if it improves CPS without losing meaning.
-   - If status is CRITICAL, you MUST shorten while preserving theology.
-   - If shortening would change theology or remove Scripture, keep meaning and note it in `reason`.
-10. CONTEXT WINDOW:
-   - `context_prev` / `context_next` are read-only.
-   - Use them to maintain gender/case agreement in Icelandic.
+   - "Partners" → "Bakhjarlar", "I AM" → "ÉG ER", "Covenant" → "Sáttmáli", "Pastor" → "Prestur"
+4. ASR CONTEXTUAL CORRECTION:
+   - Fix homophones the transcriber got wrong: "hole" vs "hold", "Halloween" vs "Hallowed" in prayers.
+5. GENDER AGREEMENT: Ensure verb/adjective endings match the speaker's gender throughout."""
+    else:
+        rules = f"""LANGUAGE-SPECIFIC CHECKS ({lang_label}):
+1. NATURAL FLOW: Ensure translations sound like native {lang_label}, not translated English.
+2. ANGLICISM DETECTION: Flag calques and literal translations that sound unnatural.
+3. THEOLOGICAL ACCURACY: Verify scripture references and religious terminology.
+4. GENDER AGREEMENT: Ensure grammatical gender is consistent with speaker identity."""
 
-INPUT DATA:
---- SOURCE (English) ---
-{json.dumps(source_segments, ensure_ascii=False)}
+    return f"""ROLE: Chief Editor for Omega TV broadcast subtitles.
 
---- DRAFT (Icelandic) ---
-{json.dumps(translated_segments, ensure_ascii=False)}
+TASK: Review the {lang_label} translation against the English source. Fix errors only.
 
---- PRIORITY SEGMENTS (Constraint-Aware Window) ---
-{json.dumps(priority_context, ensure_ascii=False)}
+WHAT TO FIX:
+- Mistranslations, missing meaning, or added content not in the source.
+- Anglicisms and unnatural phrasing (translated English instead of native {lang_label}).
+- Theological errors (wrong scripture version, incorrect terms, wrong address forms).
+- ALL CAPS text (convert to sentence case; preserve acronyms like USA, TV, ÉG ER).
+- Obvious ASR errors in the source that led to wrong translations.
+- Spoken content wrongly marked as "(MUSIC)" or left blank.
 
-OUTPUT:
-Return a JSON object with 'corrections' and a 'report'.
+WHAT NOT TO FIX:
+- Line length, line breaks, or character counts (handled by post-processing).
+- Reading speed or CPS (handled by post-processing).
+- Dialogue dashes or punctuation formatting (handled by post-processing).
+- Segments that are already correct — do not "improve" working translations.
 
-Format:
+{rules}
+
+SOURCE (English):
+{json.dumps(source_payload, ensure_ascii=False)}
+
+DRAFT ({lang_label}):
+{json.dumps(trans_payload, ensure_ascii=False)}
+
+OUTPUT: Return JSON with corrections and a quality report.
 {{
-  "corrections": [ {{ "id": 10, "fix": "Corrected Text", "reason": "Explanation" }} ],
+  "corrections": [{{"id": 10, "fix": "Corrected text", "reason": "Brief explanation"}}],
   "report": {{
     "rating": 8.5,
     "quality_tier": "Broadcast Ready",
-    "summary": "Brief analysis of the translation quality.",
-    "major_issues": ["Anglicisms", "Theological Errors"],
-    "suggestions": "Actionable advice for the translator."
+    "summary": "Brief quality analysis.",
+    "major_issues": ["Category of issues found"],
+    "suggestions": "Actionable advice."
   }}
 }}
-"""
-
-    return f"""
-ROLE: You are the Chief Editor and Quality Control Auditor for Omega TV.
-
-YOUR TASK:
-Review the {lang_suffix} translation against the English source.
-Ensure flow, grammar, and theological accuracy.
-
-STRICT RULES:
-- CAPITALIZATION (Broadcast): Do NOT allow ALL CAPS sentences; convert to natural sentence case while preserving acronyms/initialisms and mandatory titles (e.g., ÉG ER / YO SOY).
-- ASR CLEANUP: Fix obvious speech-to-text errors in the SOURCE when the intended word is clear. If uncertain, leave the original wording.
-- MUSIC VS SPEECH: If the SOURCE contains spoken content (not a pure music marker), the translation must NOT be "(MUSIC)" or blank.
-- TECHNICAL CONSTRAINTS: Use provided `effective_duration`, `gap_to_next`, and `current_cps` in the priority list to keep CPS <= 17; if CRITICAL, shorten without losing meaning.
-- CONTEXT WINDOW: `context_prev` / `context_next` are read-only; use them for grammatical agreement.
-
-INPUT DATA:
---- SOURCE (English) ---
-{json.dumps(source_segments, ensure_ascii=False)}
-
---- DRAFT ({lang_suffix}) ---
-{json.dumps(translated_segments, ensure_ascii=False)}
-
---- PRIORITY SEGMENTS (Constraint-Aware Window) ---
-{json.dumps(priority_context, ensure_ascii=False)}
-
-OUTPUT:
-Return a JSON object with 'corrections' and a 'report'.
-"""
+Only include segments that NEED fixing. Empty corrections array if all correct."""
 
 
 def _parse_editor_response(text: str) -> tuple[list[dict], dict]:

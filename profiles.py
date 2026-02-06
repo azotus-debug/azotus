@@ -264,27 +264,22 @@ def get_system_instruction(lang_code="is", profile_key="standard", extra_terms=N
     if extra_terms and isinstance(extra_terms, dict):
         active_glossary.update(extra_terms)
 
-    prompt = f"""
-    ROLE: You are the Lead Translator for Omega TV.
-    CURRENT PROGRAM: **{profile['name']}**
-    TARGET LANGUAGE: **{lang['name']}**
-    
-    --- TONE & STYLE (The Soul) ---
-    Tone: {profile['tone']}
-    
-    --- LANGUAGE RULES (The Physics) ---
-    {lang['base_prompt']}
-    
-    --- GLOSSARY (Strict Terminology) ---
-    {json.dumps(active_glossary, indent=2, ensure_ascii=False)}
-    
-    --- UNIVERSAL RULES ---
-    1. MUSIC: If a segment is purely singing/lyrics or instrumental with no speech, output `{lang['music_prompt']}`. If speech is present over music (e.g., organ under speech), translate the speech and do NOT output `{lang['music_prompt']}`.
-    2. FORMAT: Return JSON array matching input IDs.
-    3. BREVITY (Broadcast): Prefer concise, natural phrasing; remove filler; keep sentences tight to reduce CPS.
-    4. CAPITALIZATION (Broadcast): Use normal sentence case (not ALL CAPS). If the source segment is ALL CAPS, convert it to natural casing. Preserve acronyms/initialisms (e.g., USA, TV, I-690), Bible abbreviations, and mandatory theological titles (e.g., ÉG ER / YO SOY).
-    5. ASR CLEANUP: If the source contains an obvious speech-to-text error and the intended word is clear, fix it before translating. If unsure, keep the original wording.
-    """
+    prompt = f"""PROGRAM: {profile['name']}
+TARGET LANGUAGE: {lang['name']}
+
+TONE: {profile['tone']}
+
+LANGUAGE RULES:
+{lang['base_prompt']}
+
+GLOSSARY:
+{json.dumps(active_glossary, indent=2, ensure_ascii=False)}
+
+UNIVERSAL RULES:
+1. MUSIC: If a segment is purely singing/lyrics or instrumental with no speech, output `{lang['music_prompt']}`. If speech is present over music, translate the speech.
+2. BREVITY: Prefer concise, natural phrasing. Remove filler words. Subtitles are read quickly.
+3. CAPITALIZATION: Use sentence case (not ALL CAPS). Preserve acronyms (USA, TV, I-690) and mandated theological titles.
+4. ASR CLEANUP: If the source has an obvious speech-to-text error and the intended word is clear, fix it before translating."""
     
     return prompt
 

@@ -322,7 +322,7 @@ def find_skeleton(stem: str) -> Optional[Path]:
 # Gemini Models
 # ⚠️ CRITICAL: NEVER USE GEMINI 1.5. IT IS BANNED.
 MODEL_TRANSLATOR = "gemini-3-pro-preview"  # High-reasoning translation
-MODEL_EDITOR = "gemini-3-flash-preview"    # Fast, low-cost review/polish
+MODEL_EDITOR = "gemini-3-pro-preview"     # High-quality review/polish
 MODEL_ASSISTANT = "gemini-3-flash-preview"  # Assistant UI
 # Vertex AI requires "global" for preview models (gemini-3-*).
 GEMINI_LOCATION = os.environ.get("GEMINI_LOCATION", "global")

@@ -42,14 +42,18 @@ MIN_READABLE_DURATION = 1.2           # Minimum for comfortable reading
 
 # Speaker differentiation mode: "off", "dash", "separate"
 # "off" = no speaker differentiation
-# "dash" = prefix with "- " when speaker changes (BBC style)
+# "dash" = prefix with "- " on speaker change (Netflix/BBC standard)
 # "separate" = force separate subtitles for different speakers
 SPEAKER_MODE = os.environ.get("OMEGA_SPEAKER_MODE", "dash").strip().lower()
 
 
 def _apply_speaker_dash(events: list[dict], prev_speaker: str = None) -> tuple[list[dict], str]:
     """
-    Apply BBC-style dash indicators for speaker changes.
+    Apply Netflix-standard dialogue dashes for speaker changes.
+
+    Format: "- Text" (hyphen-minus + space) per Netflix Timed Text Style Guide.
+    Applied when speaker changes between subtitle blocks, or when a single block
+    contains dual dialogue (two speakers).
     """
     if SPEAKER_MODE == "off":
         return events, prev_speaker
@@ -58,22 +62,35 @@ def _apply_speaker_dash(events: list[dict], prev_speaker: str = None) -> tuple[l
         speaker = event.get("speaker")
         text = event.get("text", "").strip()
 
-        # 1. Change between subtitle blocks
+        # Normalize any en-dash/em-dash dialogue markers to standard hyphen
+        text = _normalize_dialogue_dashes(text)
+        event["text"] = text
+
+        # 1. Speaker change between consecutive subtitle blocks
         if speaker is not None and prev_speaker is not None and speaker != prev_speaker:
-            if not (text.startswith("- ") or text.startswith("– ") or text.startswith("— ")):
+            if not text.startswith("- "):
                 event["text"] = f"- {text}"
                 event["speaker_changed"] = True
-        
-        # 2. Case where AI might have already signaled multiple speakers in one block
-        # (e.g. "Hello.\n- Hi.") - ensures the FIRST line also gets a dash for consistency
-        if "\n-" in text or "\n–" in text or "\n—" in text:
-            if not (text.startswith("- ") or text.startswith("– ") or text.startswith("— ")):
+
+        # 2. Dual dialogue within a single block (AI placed \n- for two speakers)
+        #    Ensure first line also gets a dash for consistency
+        if "\n-" in text:
+            if not text.startswith("- "):
                 event["text"] = f"- {text}"
                 event["speaker_changed"] = True
 
         prev_speaker = speaker if speaker is not None else prev_speaker
 
     return events, prev_speaker
+
+
+def _normalize_dialogue_dashes(text: str) -> str:
+    """Normalize en-dash (–) and em-dash (—) dialogue markers to hyphen-minus (-)."""
+    import re
+    # Replace en-dash or em-dash at start of line (with optional space) with standard "- "
+    text = re.sub(r'^[–—]\s*', '- ', text)
+    text = re.sub(r'\n[–—]\s*', '\n- ', text)
+    return text
 
 
 def _safe_float_env(name: str, default: float) -> float:
@@ -1470,7 +1487,7 @@ def normalize_segments_for_review(
         # Split into balanced lines (max 2 lines, max 42 chars each)
         lines = split_into_balanced_lines(text, target_language)
 
-        # Speaker dash (BBC style)
+        # Speaker dash (Netflix standard: "- " prefix)
         speaker = current.get('speaker')
         if speaker is not None and prev_speaker is not None and speaker != prev_speaker:
             if not lines[0].startswith("- "):
@@ -1873,8 +1890,8 @@ def finalize(
 
                 logger.info(f"   🩹 Rescued stranded fragment '{first_word}' back to block {i+1}")
 
-    # PASS 1.8: SPEAKER DIFFERENTIATION (BBC-style dash indicators)
-    # When speaker changes between subtitles, prefix with "- " for clarity
+    # PASS 1.8: SPEAKER DIFFERENTIATION (Netflix-standard dialogue dashes)
+    # When speaker changes between subtitles, prefix with "- " per Netflix Timed Text Style Guide
     if SPEAKER_MODE != "off":
         processed_events, _ = _apply_speaker_dash(processed_events)
         speaker_changes = sum(1 for e in processed_events if e.get("speaker_changed"))
