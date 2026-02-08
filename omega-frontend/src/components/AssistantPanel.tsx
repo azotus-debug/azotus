@@ -1,17 +1,24 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { Sparkles, Zap, ArrowUp, Loader2 } from "lucide-react";
+import { Sparkles, Zap, ArrowUp, Loader2, Check, Copy, ClipboardCheck } from "lucide-react";
+
+type StructuredSuggestion = {
+  segment_id: number;
+  suggested_text: string;
+};
 
 type AssistantMessage = {
   role: "user" | "assistant";
   content: string;
+  suggestions?: StructuredSuggestion[];
 };
 
 interface AssistantPanelProps {
   jobId: string | null;
   onClose?: () => void;
   mode?: "modal" | "sidebar";
+  onApplySuggestion?: (segmentId: number, newText: string) => void;
 }
 
 const QUICK_PROMPTS = [
@@ -20,16 +27,68 @@ const QUICK_PROMPTS = [
   { label: "Broadcast tone", prompt: "Make the tone broadcast friendly and natural, keep it concise." },
 ];
 
-export function AssistantPanel({ jobId }: AssistantPanelProps) {
+/**
+ * Try to extract structured suggestions from the assistant response.
+ * Expects an array of {segment_id, suggested_text} objects in data.suggestions,
+ * or falls back to parsing the response text for patterns like:
+ *   Segment 12: "suggested text here"
+ */
+function parseSuggestions(data: Record<string, unknown>): StructuredSuggestion[] {
+  // Prefer explicit structured field from the API
+  if (Array.isArray(data.suggestions)) {
+    return data.suggestions.filter(
+      (s: unknown): s is StructuredSuggestion =>
+        typeof s === "object" &&
+        s !== null &&
+        typeof (s as StructuredSuggestion).segment_id === "number" &&
+        typeof (s as StructuredSuggestion).suggested_text === "string"
+    );
+  }
+
+  // Fallback: try to parse from response text
+  const text = String(data.response || "");
+  const results: StructuredSuggestion[] = [];
+  // Match patterns like: Segment 5: "some text here" or Segment #5: "text"
+  const regex = /[Ss]egment\s*#?(\d+)\s*:\s*"([^"]+)"/g;
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    results.push({
+      segment_id: parseInt(match[1], 10),
+      suggested_text: match[2],
+    });
+  }
+  return results;
+}
+
+export function AssistantPanel({ jobId, onApplySuggestion }: AssistantPanelProps) {
   const [input, setInput] = useState("");
   // Start with an empty array so the Welcome state shows cleanly
   const [messages, setMessages] = useState<AssistantMessage[]>([]);
   const [loading, setLoading] = useState(false);
+  const [appliedIds, setAppliedIds] = useState<Set<string>>(new Set());
+  const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [messages]);
+
+  const handleApply = (suggestion: StructuredSuggestion) => {
+    if (onApplySuggestion) {
+      onApplySuggestion(suggestion.segment_id, suggestion.suggested_text);
+      setAppliedIds((prev) => new Set(prev).add(`${suggestion.segment_id}-${suggestion.suggested_text}`));
+    }
+  };
+
+  const handleCopy = async (text: string, msgIndex: number) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedIdx(msgIndex);
+      setTimeout(() => setCopiedIdx(null), 2000);
+    } catch {
+      // Clipboard API unavailable
+    }
+  };
 
   const handleSend = async () => {
     if (!input.trim() || !jobId) return;
@@ -45,7 +104,15 @@ export function AssistantPanel({ jobId }: AssistantPanelProps) {
         body: JSON.stringify({ job_id: jobId, message: newMsg.content, history: messages }),
       });
       const data = await res.json();
-      setMessages((p) => [...p, { role: "assistant", content: String(data.response || "Done.") }]);
+      const suggestions = parseSuggestions(data);
+      setMessages((p) => [
+        ...p,
+        {
+          role: "assistant",
+          content: String(data.response || "Done."),
+          suggestions: suggestions.length > 0 ? suggestions : undefined,
+        },
+      ]);
     } catch {
       setMessages((p) => [...p, { role: "assistant", content: "Error." }]);
     } finally {
@@ -94,6 +161,74 @@ export function AssistantPanel({ jobId }: AssistantPanelProps) {
                 }`}
             >
               {m.content}
+
+              {/* Structured Suggestions - Apply buttons */}
+              {m.role === "assistant" && m.suggestions && m.suggestions.length > 0 && (
+                <div className="mt-3 pt-3 border-t border-[#2d3748] space-y-2">
+                  {m.suggestions.map((suggestion, si) => {
+                    const key = `${suggestion.segment_id}-${suggestion.suggested_text}`;
+                    const isApplied = appliedIds.has(key);
+                    return (
+                      <div
+                        key={si}
+                        className="flex items-start gap-2 bg-[#0d1117] rounded-lg p-3 border border-[#21262d]"
+                      >
+                        <div className="flex-1 min-w-0">
+                          <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">
+                            Segment {suggestion.segment_id}
+                          </div>
+                          <div className="text-[12px] text-gray-300 break-words">
+                            {suggestion.suggested_text}
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => handleApply(suggestion)}
+                          disabled={isApplied}
+                          className={`shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[11px] font-medium transition-all ${
+                            isApplied
+                              ? "bg-green-500/10 text-green-400 border border-green-500/20 cursor-default"
+                              : "bg-purple-600/20 text-purple-300 border border-purple-500/30 hover:bg-purple-600/30 hover:text-purple-200"
+                          }`}
+                        >
+                          {isApplied ? (
+                            <>
+                              <Check className="w-3 h-3" />
+                              Applied
+                            </>
+                          ) : (
+                            <>
+                              <Check className="w-3 h-3" />
+                              Apply
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Plain text assistant response - Copy button */}
+              {m.role === "assistant" && (!m.suggestions || m.suggestions.length === 0) && (
+                <div className="mt-2 pt-2 border-t border-[#2d3748] flex justify-end">
+                  <button
+                    onClick={() => handleCopy(m.content, i)}
+                    className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[10px] font-medium text-gray-500 hover:text-gray-300 hover:bg-[#21262d] transition-all"
+                  >
+                    {copiedIdx === i ? (
+                      <>
+                        <ClipboardCheck className="w-3 h-3 text-green-400" />
+                        <span className="text-green-400">Copied</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3 h-3" />
+                        Copy
+                      </>
+                    )}
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         ))}

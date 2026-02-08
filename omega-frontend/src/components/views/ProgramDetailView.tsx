@@ -10,6 +10,7 @@ import ProgressBar from "@/components/common/ProgressBar";
 import TrackDetailPanel from "@/components/common/TrackDetailPanel";
 import { useNavigation } from "@/store/navigation";
 import { useProgramsStore, Track } from "@/store/programs";
+import { useSSEContext } from "@/components/SSEProvider";
 
 interface Props {
   programId: string;
@@ -180,23 +181,10 @@ export default function ProgramDetailView({ programId }: Props) {
   const [notifyEmail, setNotifyEmail] = useState("");
   const [notifyLink, setNotifyLink] = useState("");
 
+  const { subscribe } = useSSEContext();
+
   const program = programs.find((p) => p.id === programId);
   const tracks = program?.tracks || [];
-
-  // Check if any track is in active/processing stage
-  const hasActiveTrack = program?.tracks?.some(track =>
-    [
-      "BURNING",
-      "FINALIZING",
-      "INGESTING",
-      "TRANSCRIBING",
-      "TRANSLATING",
-      "TRANSLATING_CLOUD_SUBMITTED",
-      "CLOUD_TRANSLATING",
-      "CLOUD_REVIEWING",
-      "CLOUD_EDITING",
-    ].includes(track.stage)
-  );
 
   useEffect(() => {
     if (!program) {
@@ -204,16 +192,15 @@ export default function ProgramDetailView({ programId }: Props) {
     }
   }, [program, fetchPrograms]);
 
-  // Real-time polling during active stages
+  // SSE subscriptions for real-time updates
   useEffect(() => {
-    if (!hasActiveTrack) return;
-
-    const pollInterval = setInterval(() => {
-      fetchPrograms();
-    }, 5000); // Poll every 5 seconds
-
-    return () => clearInterval(pollInterval);
-  }, [hasActiveTrack, fetchPrograms]);
+    const unsubs = [
+      subscribe("programs_updated", () => fetchPrograms()),
+      subscribe("tracks_updated", () => fetchPrograms()),
+      subscribe("track_progress", () => fetchPrograms()),
+    ];
+    return () => unsubs.forEach(fn => fn());
+  }, [subscribe, fetchPrograms]);
 
   useEffect(() => {
     if (!tracks.length) return;

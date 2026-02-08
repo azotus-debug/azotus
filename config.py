@@ -338,6 +338,8 @@ OMEGA_CLOUD_MUSIC_DETECT = os.environ.get("OMEGA_CLOUD_MUSIC_DETECT", "1").strip
 OMEGA_CLOUD_SYNC_ENABLED = os.environ.get("OMEGA_CLOUD_SYNC_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
 OMEGA_CLOUD_SYNC_POLL_SECONDS = float(os.environ.get("OMEGA_CLOUD_SYNC_POLL_SECONDS", "60"))
 OMEGA_CLOUD_SYNC_BATCH_LIMIT = int(os.environ.get("OMEGA_CLOUD_SYNC_BATCH_LIMIT", "50"))
+OMEGA_CLOUD_SYNC_DB_FAILURE_THRESHOLD = int(os.environ.get("OMEGA_CLOUD_SYNC_DB_FAILURE_THRESHOLD", "3"))
+OMEGA_CLOUD_SYNC_DB_COOLDOWN_SECONDS = float(os.environ.get("OMEGA_CLOUD_SYNC_DB_COOLDOWN_SECONDS", "300"))
 # Dead-man timeout for cloud jobs (minutes). Set to 0 to disable.
 OMEGA_CLOUD_DEADMAN_MINUTES = int(os.environ.get("OMEGA_CLOUD_DEADMAN_MINUTES", "60"))
 

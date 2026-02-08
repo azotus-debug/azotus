@@ -111,6 +111,9 @@ interface OpsStore {
 
   // Refresh
   refreshAll: () => Promise<void>;
+
+  // SSE
+  handleSSEEvent: (eventType: string, data: any) => void;
 }
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
@@ -258,5 +261,34 @@ export const useOpsStore = create<OpsStore>((set, get) => ({
       fetchQueue(),
       fetchDeliveries(),
     ]);
+  },
+
+  handleSSEEvent: (eventType: string, data: any) => {
+    const { refreshAll } = get();
+
+    switch (eventType) {
+      case "ops_updated":
+      case "programs_updated":
+        refreshAll();
+        break;
+      case "track_progress": {
+        // Optimistic in-place update of matching track in queue
+        const { track_id, progress, status, stage } = data || {};
+        if (!track_id) break;
+        set((state) => ({
+          queue: state.queue.map((track) =>
+            track.id === track_id
+              ? {
+                    ...track,
+                    ...(progress !== undefined && { progress }),
+                    ...(status !== undefined && { status }),
+                    ...(stage !== undefined && { stage }),
+                }
+              : track
+          ),
+        }));
+        break;
+      }
+    }
   },
 }));

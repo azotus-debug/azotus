@@ -1,10 +1,12 @@
 "use client";
 
-import { CSSProperties, useEffect, useState } from "react";
-import { ChevronLeft, ChevronRight, X, Download } from "lucide-react";
+import { CSSProperties, useEffect, useMemo, useState } from "react";
+import { ChevronLeft, ChevronRight, Search, X, Download } from "lucide-react";
 import PageHeader from "@/components/layout/PageHeader";
 import Badge from "@/components/common/Badge";
 import Button from "@/components/common/Button";
+import { useToastStore } from "@/store/toast";
+import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 
@@ -123,11 +125,29 @@ export default function WeeklyGridView() {
     const [error, setError] = useState<string | null>(null);
     const [selectedTrack, setSelectedTrack] = useState<SelectedTrack | null>(null);
     const [creating, setCreating] = useState(false);
+    const [weekOffset, setWeekOffset] = useState(0);
+    const addToast = useToastStore(s => s.addToast);
+    const [confirmCreate, setConfirmCreate] = useState<{programId: string, langCode: string, langName: string} | null>(null);
+    const [searchQuery, setSearchQuery] = useState("");
+
+    // Filter programs by search query (title, client, air date)
+    const filteredPrograms = useMemo(() => {
+        const programs = data?.programs ?? [];
+        const q = searchQuery.trim().toLowerCase();
+        if (!q) return programs;
+        return programs.filter(
+            (p) =>
+                p.title.toLowerCase().includes(q) ||
+                p.client_id?.toLowerCase().includes(q) ||
+                p.air_date?.toLowerCase().includes(q)
+        );
+    }, [data?.programs, searchQuery]);
 
     // Fetch grid data
-    const fetchGridData = async () => {
+    const fetchGridData = async (offset = 0) => {
         try {
-            const res = await fetch(`${API_BASE}/api/v2/weekly_grid`, { cache: "no-store" });
+            const params = offset !== 0 ? `?week_offset=${offset}` : "";
+            const res = await fetch(`${API_BASE}/api/v2/weekly_grid${params}`, { cache: "no-store" });
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const json = await res.json();
             setData(json);
@@ -140,16 +160,19 @@ export default function WeeklyGridView() {
     };
 
     useEffect(() => {
-        fetchGridData();
-    }, []);
+        fetchGridData(weekOffset);
+    }, [weekOffset]);
 
     // Create a new track
-    const handleCreateTrack = async (programId: string, langCode: string, langName: string) => {
+    const handleCreateTrack = (programId: string, langCode: string, langName: string) => {
         if (creating) return;
+        setConfirmCreate({ programId, langCode, langName });
+    };
 
-        const confirmed = window.confirm(`Create ${langName} track for this program?`);
-        if (!confirmed) return;
-
+    const executeCreateTrack = async () => {
+        if (!confirmCreate) return;
+        const { programId, langCode, langName } = confirmCreate;
+        setConfirmCreate(null);
         setCreating(true);
         try {
             const res = await fetch(`${API_BASE}/api/v2/tracks`, {
@@ -161,10 +184,11 @@ export default function WeeklyGridView() {
                 const errData = await res.json().catch(() => ({}));
                 throw new Error(errData.error || "Failed to create track");
             }
+            addToast(`${langName} track created`, "success");
             // Refresh data
             await fetchGridData();
         } catch (e) {
-            alert(e instanceof Error ? e.message : "Failed to create track");
+            addToast(e instanceof Error ? e.message : "Failed to create track", "error");
         } finally {
             setCreating(false);
         }
@@ -215,25 +239,57 @@ export default function WeeklyGridView() {
         );
     }
 
-    const programCount = data?.programs?.length || 0;
+    const totalCount = data?.programs?.length || 0;
+    const programCount = filteredPrograms.length;
 
     return (
         <section className="weekly-grid-view">
             <PageHeader
                 title="Weekly Grid"
-                subtitle={`${programCount} program${programCount !== 1 ? "s" : ""}`}
+                subtitle={`${programCount} program${programCount !== 1 ? "s" : ""}${searchQuery ? ` (of ${totalCount})` : ""}`}
             />
 
             {/* Controls */}
             <div className="weekly-grid-controls">
                 <div className="week-nav">
-                    <button type="button" className="week-nav-btn" title="Previous Week">
+                    <button type="button" className="week-nav-btn" title="Previous Week" onClick={() => setWeekOffset((prev) => prev - 1)}>
                         <ChevronLeft size={16} />
                     </button>
                     <span className="week-label">{data?.week_label || "All Programs"}</span>
-                    <button type="button" className="week-nav-btn" title="Next Week">
+                    <button type="button" className="week-nav-btn" title="Next Week" onClick={() => setWeekOffset((prev) => prev + 1)}>
                         <ChevronRight size={16} />
                     </button>
+                    {weekOffset !== 0 && (
+                        <button
+                            type="button"
+                            className="week-nav-btn"
+                            style={{ marginLeft: 8, fontSize: 12, padding: "4px 12px" }}
+                            title="Jump to current week"
+                            onClick={() => setWeekOffset(0)}
+                        >
+                            Today
+                        </button>
+                    )}
+                </div>
+                <div className="grid-search">
+                    <Search size={14} className="grid-search-icon" />
+                    <input
+                        type="text"
+                        className="grid-search-input"
+                        placeholder="Filter programs..."
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                    />
+                    {searchQuery && (
+                        <button
+                            type="button"
+                            className="grid-search-clear"
+                            onClick={() => setSearchQuery("")}
+                            aria-label="Clear search"
+                        >
+                            <X size={12} />
+                        </button>
+                    )}
                 </div>
             </div>
 
@@ -257,7 +313,7 @@ export default function WeeklyGridView() {
                             </tr>
                         </thead>
                         <tbody>
-                            {data?.programs.map((program) => (
+                            {filteredPrograms.map((program) => (
                                 <tr key={program.program_id} className="weekly-grid-row">
                                     {/* Program Info Cell */}
                                     <td className="weekly-grid-td">
@@ -363,6 +419,7 @@ export default function WeeklyGridView() {
                                                         type="button"
                                                         className="download-btn"
                                                         title="Download"
+                                                        onClick={() => window.open(output.url, "_blank")}
                                                     >
                                                         <Download size={14} />
                                                     </button>
@@ -403,6 +460,16 @@ export default function WeeklyGridView() {
                     </>
                 )}
             </aside>
+            <ConfirmDialog
+                open={!!confirmCreate}
+                title="Create Track"
+                message={`Create ${confirmCreate?.langName} track for this program?`}
+                confirmLabel="Create"
+                cancelLabel="Cancel"
+                variant="default"
+                onConfirm={executeCreateTrack}
+                onCancel={() => setConfirmCreate(null)}
+            />
         </section>
     );
 }

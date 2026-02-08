@@ -2409,9 +2409,9 @@ def api_editor(job_id):
             job = omega_db.get_job_via_track(job_id)
             lang = job.get('target_language', 'is') if job else 'is'
 
-            # Use new simple SRT conversion since segments are already formatted
+            # Use SRT conversion with line-breaking enforcement
             srt_path = config.SRT_DIR / f"{job_id}.srt"
-            finalizer.segments_to_srt(new_segments, srt_path)
+            finalizer.segments_to_srt(new_segments, srt_path, target_language=lang)
 
             # Create normalized JSON for compatibility
             normalized_path = config.SRT_DIR / f"{job_id}_normalized.json"
@@ -4260,6 +4260,37 @@ def api_v2_voices():
     ]
     
     return jsonify({"voices": voices})
+
+
+# =============================================================================
+# App Settings API
+# =============================================================================
+
+@app.route('/api/v2/settings', methods=['GET'])
+def api_v2_get_settings():
+    """Return the full app settings object."""
+    try:
+        settings = omega_db.get_app_settings()
+        return jsonify(settings)
+    except Exception as e:
+        logger.error(f"Failed to get settings: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/v2/settings', methods=['PATCH'])
+def api_v2_update_settings():
+    """Update one or more app settings. Accepts a partial JSON object."""
+    try:
+        data = request.get_json()
+        if not data or not isinstance(data, dict):
+            return jsonify({"error": "Request body must be a JSON object"}), 400
+
+        updated = omega_db.update_app_settings(data)
+        return jsonify(updated)
+    except Exception as e:
+        logger.error(f"Failed to update settings: {e}")
+        return jsonify({"error": str(e)}), 500
+
 
 # =============================================================================
 # Server-Sent Events (SSE) for Real-Time Updates

@@ -4,8 +4,11 @@ import { CSSProperties, useEffect, useMemo, useState } from "react";
 import { Clock, Trash2 } from "lucide-react";
 import Badge from "@/components/common/Badge";
 import PageHeader from "@/components/layout/PageHeader";
+import { ProgramGridSkeleton } from "@/components/common/Skeleton";
 import { useNavigation } from "@/store/navigation";
 import { useProgramsStore, Program } from "@/store/programs";
+import { useToastStore } from "@/store/toast";
+import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 
@@ -127,28 +130,36 @@ export default function LibraryView() {
   const { programs, loading, error, fetchPrograms } = useProgramsStore();
   const [filter, setFilter] = useState<LibraryFilter>("all");
   const [search, setSearch] = useState("");
+  const addToast = useToastStore(s => s.addToast);
+  const [confirmDelete, setConfirmDelete] = useState<{id: string, title: string} | null>(null);
 
   useEffect(() => {
     fetchPrograms();
   }, [fetchPrograms]);
 
-  const handleDeleteProgram = async (programId: string, title: string, event: React.MouseEvent) => {
+  const handleDeleteProgram = (programId: string, title: string, event: React.MouseEvent) => {
     event.stopPropagation();
-    if (!confirm(`Delete "${title}" and all associated files?\n\nThis cannot be undone.`)) return;
+    setConfirmDelete({ id: programId, title });
+  };
 
+  const executeDelete = async () => {
+    if (!confirmDelete) return;
+    const { id, title } = confirmDelete;
+    setConfirmDelete(null);
     try {
-      const response = await fetch(`${API_BASE}/api/v2/programs/${programId}`, {
+      const response = await fetch(`${API_BASE}/api/v2/programs/${id}`, {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
       });
       const data = await response.json();
       if (data.success) {
-        fetchPrograms(); // Refresh
+        addToast(`"${title}" deleted`, "success");
+        fetchPrograms();
       } else {
-        alert(`Delete failed: ${data.error || "Unknown error"}`);
+        addToast(`Delete failed: ${data.error || "Unknown error"}`, "error");
       }
     } catch (err) {
-      alert(`Delete failed: ${err}`);
+      addToast(`Delete failed: ${err}`, "error");
     }
   };
 
@@ -191,7 +202,7 @@ export default function LibraryView() {
     return (
       <section className="library-view">
         <PageHeader title="Library" subtitle="Loading programs..." />
-        <div className="loading-spinner" />
+        <ProgramGridSkeleton count={8} />
       </section>
     );
   }
@@ -402,6 +413,16 @@ export default function LibraryView() {
           })}
         </div>
       )}
+      <ConfirmDialog
+        open={!!confirmDelete}
+        title="Delete Program"
+        message={`Delete "${confirmDelete?.title}" and all associated files? This cannot be undone.`}
+        confirmLabel="Delete"
+        cancelLabel="Cancel"
+        variant="danger"
+        onConfirm={executeDelete}
+        onCancel={() => setConfirmDelete(null)}
+      />
     </section>
   );
 }

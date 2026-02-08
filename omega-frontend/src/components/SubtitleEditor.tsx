@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useMemo, useRef } from "react";
+import { useToastStore } from "@/store/toast";
 import {
   Save,
   Loader2,
@@ -25,6 +26,7 @@ import { AIQualityPanel } from "@/components/AIQualityPanel";
 import { VersionHistoryPanel } from "@/components/VersionHistoryPanel";
 import { OnScreenTextCapture } from "@/components/OnScreenTextCapture";
 import { GraphicZonesPanel, GraphicZone } from "@/components/GraphicZonesPanel";
+import { KeyboardShortcutHelp } from "@/components/common/KeyboardShortcutHelp";
 
 interface Segment {
   id?: number;
@@ -151,25 +153,37 @@ const AccordionItem = ({
 );
 
 export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [], track }: SubtitleEditorProps) {
+  const addToast = useToastStore(s => s.addToast);
   const [segments, setSegments] = useState<Segment[]>(initialSegments);
   const trackInfo = track ?? null;
   const trackLanguage = (trackInfo?.language_code || trackInfo?.meta?.target_language || 'is').toLowerCase();
   const editorReportRaw = trackInfo?.meta?.editor_report;
   const [saving, setSaving] = useState(false);
   const [lastSaved, setLastSaved] = useState<Date | null>(null);
+  const [isDirty, setIsDirty] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
   const activeSegmentRef = useRef<HTMLDivElement>(null);
 
-  const [history, setHistory] = useState<Segment[][]>([]);
+  const [history, setHistory] = useState<Segment[][]>(() => {
+    try {
+      const stored = localStorage.getItem(`omega-history-${jobId}`);
+      return stored ? JSON.parse(stored) : [];
+    } catch {
+      return [];
+    }
+  });
   const [selectedIndices, setSelectedIndices] = useState<Set<number>>(new Set());
   const [flaggedSegmentIds, setFlaggedSegmentIds] = useState<Set<number>>(new Set());
   const [graphicZones, setGraphicZones] = useState<GraphicZone[]>(initialGraphicZones);
   const [isMarkingZone, setIsMarkingZone] = useState(false);
   const [pendingZoneStart, setPendingZoneStart] = useState<number | null>(null);
   const [showOnlyIssues, setShowOnlyIssues] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const [showShortcutHelp, setShowShortcutHelp] = useState(false);
 
   // Sidebar State
   const [activeAccordion, setActiveAccordion] = useState<string>("quality");
@@ -193,6 +207,17 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
     if (history.length === 0 && initialSegments.length > 0) setSegments(initialSegments);
   }, [initialSegments]);
 
+  // Persist history to localStorage (keep last 20 entries to avoid quota issues)
+  useEffect(() => {
+    if (history.length > 0) {
+      try {
+        localStorage.setItem(`omega-history-${jobId}`, JSON.stringify(history.slice(-20)));
+      } catch {
+        // localStorage full or unavailable - silently ignore
+      }
+    }
+  }, [history, jobId]);
+
   const pushHistory = () => setHistory((prev) => [...prev.slice(-49), segments]);
 
   const handleUndo = () => {
@@ -201,6 +226,7 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
     setSegments(previous);
     setHistory((prev) => prev.slice(0, -1));
     setSelectedIndices(new Set());
+    setIsDirty(true);
   };
 
   const warningsByIndex = useMemo(
@@ -235,9 +261,19 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
       index,
       warnings: warningsByIndex[index] || [],
     }));
-    if (!showOnlyIssues) return items;
-    return items.filter((item) => item.warnings.length > 0);
-  }, [segments, warningsByIndex, showOnlyIssues]);
+    let filtered = items;
+    if (showOnlyIssues) {
+      filtered = filtered.filter((item) => item.warnings.length > 0);
+    }
+    if (searchQuery.trim()) {
+      const q = searchQuery.trim().toLowerCase();
+      filtered = filtered.filter((item) =>
+        item.segment.text.toLowerCase().includes(q) ||
+        (item.segment.source_text || "").toLowerCase().includes(q)
+      );
+    }
+    return filtered;
+  }, [segments, warningsByIndex, showOnlyIssues, searchQuery]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -263,7 +299,14 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
   // Keyboard shortcuts: J (prev), K (play/pause), L (next), Space (play/pause)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Don't trigger shortcuts when typing in input fields
+      // Allow Cmd/Ctrl+F even when focused on input fields
+      if (e.key.toLowerCase() === "f" && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        return;
+      }
+
+      // Don't trigger other shortcuts when typing in input fields
       const target = e.target as HTMLElement;
       if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable) {
         return;
@@ -294,6 +337,10 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
             e.preventDefault();
             handleUndo();
           }
+          break;
+        case "?":
+          e.preventDefault();
+          setShowShortcutHelp(prev => !prev);
           break;
         case "g":
           e.preventDefault();
@@ -341,6 +388,7 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
     const newSegments = [...segments];
     newSegments[index] = { ...newSegments[index], [field]: value };
     setSegments(newSegments);
+    setIsDirty(true);
   };
 
   const handleSelect = (index: number, multi: boolean) => {
@@ -368,6 +416,7 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
     const toRemove = new Set(sorted.slice(1));
     setSegments(segments.filter((_, i) => !toRemove.has(i)));
     setSelectedIndices(new Set([firstIdx]));
+    setIsDirty(true);
   };
 
   const handleSplit = () => {
@@ -389,6 +438,7 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
     newSegments.splice(idx, 1, newSeg1, newSeg2);
     setSegments(newSegments);
     setSelectedIndices(new Set([idx, idx + 1]));
+    setIsDirty(true);
   };
 
   const handleDelete = () => {
@@ -396,6 +446,7 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
     pushHistory();
     setSegments(segments.filter((_, i) => !selectedIndices.has(i)));
     setSelectedIndices(new Set());
+    setIsDirty(true);
   };
 
   const handleSave = async () => {
@@ -411,8 +462,10 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
         }),
       });
       setLastSaved(new Date());
+      setIsDirty(false);
+      addToast("Saved successfully", "success");
     } catch {
-      alert("Save failed");
+      addToast("Save failed", "error");
     } finally {
       setSaving(false);
     }
@@ -426,6 +479,27 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
       activeSegmentRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
     }
   }, [activeIndex, selectedIndices]);
+
+  // Auto-save every 30s when dirty
+  useEffect(() => {
+    if (!isDirty) return;
+    const timer = setTimeout(() => {
+      handleSave();
+    }, 30000);
+    return () => clearTimeout(timer);
+  }, [isDirty, segments, graphicZones]);
+
+  // Warn before leaving with unsaved changes
+  useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (isDirty) {
+        e.preventDefault();
+        e.returnValue = "";
+      }
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [isDirty]);
 
   const seekPrev = () => {
     if (!segments.length) return;
@@ -457,12 +531,24 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
           </div>
         </div>
         <div className="flex items-center gap-3">
-          {lastSaved && (
+          {isDirty ? (
+            <span className="pill text-[10px] text-amber-400">
+              <span className="w-2 h-2 rounded-full bg-amber-400 inline-block animate-pulse" />
+              Unsaved changes
+            </span>
+          ) : lastSaved ? (
             <span className="pill text-[10px]">
               <Clock className="w-3 h-3" />
               Saved {lastSaved.toLocaleTimeString()}
             </span>
-          )}
+          ) : null}
+          <button
+            onClick={() => setShowShortcutHelp(true)}
+            className="btn btn-ghost p-2 text-muted hover:text-white"
+            title="Keyboard shortcuts (?)"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg>
+          </button>
           <button onClick={handleSave} disabled={saving} className="btn btn-primary">
             {saving ? <Loader2 className="w-4 h-4 spin" /> : <Save className="w-4 h-4" />}
             Save
@@ -546,6 +632,32 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
               <span className="text-xs text-muted">{segments.length} segments</span>
             </div>
 
+            {/* Search Bar */}
+            <div className="h-9 flex items-center gap-2 px-5 border-b border-subtle shrink-0">
+              <svg xmlns="http://www.w3.org/2000/svg" className="w-3.5 h-3.5 text-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+              <input
+                ref={searchInputRef}
+                type="text"
+                placeholder="Search segments..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="flex-1 bg-transparent text-sm text-gray-200 outline-none placeholder:text-gray-600"
+              />
+              {searchQuery && (
+                <button
+                  onClick={() => setSearchQuery("")}
+                  className="text-xs text-gray-500 hover:text-gray-300 transition-colors"
+                >
+                  Clear
+                </button>
+              )}
+              {searchQuery && (
+                <span className="text-xs text-muted">
+                  {visibleSegments.length} result{visibleSegments.length !== 1 ? "s" : ""}
+                </span>
+              )}
+            </div>
+
             <div className="qc-summary">
               <div className="qc-summary-left">
                 <span className="qc-summary-title">QC</span>
@@ -602,7 +714,7 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
                           ? "bg-white/5"
                           : "hover:bg-white/[0.02]"
                       } border-subtle`}
-                    title={isFlagged ? "⚠️ Flagged for review" : undefined}
+                    title={isFlagged ? "\u26A0\uFE0F Flagged for review" : undefined}
                   >
                     {/* IN Timecode */}
                     <div
@@ -618,9 +730,9 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
                       {warnings.length > 0 && (
                         <span
                           className={`qc-warning qc-warning--${warningLevel}`}
-                          title={warnings.map((w) => w.msg).join(" • ")}
+                          title={warnings.map((w) => w.msg).join(" \u2022 ")}
                         >
-                          ⚠️
+                          {"\u26A0\uFE0F"}
                         </span>
                       )}
                     </div>
@@ -646,7 +758,7 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
                         setSelectedIndices(new Set([index]));
                       }}
                     >
-                      {seg.source_text || "—"}
+                      {seg.source_text || "\u2014"}
                     </div>
                     {/* Text Content */}
                     <textarea
@@ -696,7 +808,21 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
             {/* Copilot Content */}
             {copilotExpanded && (
               <div className="flex-1 min-h-0 overflow-hidden">
-                <AssistantPanel jobId={jobId} mode="sidebar" />
+                <AssistantPanel
+                  jobId={jobId}
+                  mode="sidebar"
+                  onApplySuggestion={(segmentId, newText) => {
+                    const idx = segments.findIndex(s => s.id === segmentId);
+                    if (idx >= 0) {
+                      pushHistory();
+                      const newSegments = [...segments];
+                      newSegments[idx] = { ...newSegments[idx], text: newText };
+                      setSegments(newSegments);
+                      setSelectedIndices(new Set([idx]));
+                      setIsDirty(true);
+                    }
+                  }}
+                />
               </div>
             )}
           </div>
@@ -788,6 +914,11 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
           </div>
         </div>
       </div>
+
+      <KeyboardShortcutHelp
+        open={showShortcutHelp}
+        onClose={() => setShowShortcutHelp(false)}
+      />
     </div>
   );
 }

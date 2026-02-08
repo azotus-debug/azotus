@@ -6,6 +6,7 @@ import ProgressBar from "@/components/common/ProgressBar";
 import PageHeader from "@/components/layout/PageHeader";
 import { useNavigation } from "@/store/navigation";
 import { useProgramsStore, Track, PipelineStats } from "@/store/programs";
+import { useSSEContext } from "@/components/SSEProvider";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 
@@ -72,11 +73,32 @@ export default function PipelineView() {
   const [retrying, setRetrying] = useState<Record<string, boolean>>({});
   const [retryErrors, setRetryErrors] = useState<Record<string, string>>({});
 
+  const { subscribe } = useSSEContext();
+
   useEffect(() => {
     fetchActiveTracks();
     fetchPrograms();
     fetchPipelineStats();
   }, [fetchActiveTracks, fetchPrograms, fetchPipelineStats]);
+
+  // SSE subscriptions for real-time updates
+  useEffect(() => {
+    const unsubs = [
+      subscribe("pipeline_updated", () => {
+        fetchActiveTracks();
+        fetchPipelineStats();
+      }),
+      subscribe("tracks_updated", () => {
+        fetchActiveTracks();
+        fetchPrograms();
+        fetchPipelineStats();
+      }),
+      subscribe("track_progress", () => {
+        fetchActiveTracks();
+      }),
+    ];
+    return () => unsubs.forEach(fn => fn());
+  }, [subscribe, fetchActiveTracks, fetchPrograms, fetchPipelineStats]);
 
   // Group tracks by stage
   const tracksByStage: Record<string, TrackWithProgram[]> = {};

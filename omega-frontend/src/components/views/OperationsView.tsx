@@ -3,9 +3,11 @@
 import { useEffect, useState } from "react";
 import { useOpsStore, QueueTrack } from "@/store/ops";
 import { useNavigation } from "@/store/navigation";
+import { useSSEContext } from "@/components/SSEProvider";
 import Badge from "@/components/common/Badge";
 import Button from "@/components/common/Button";
 import PageHeader from "@/components/layout/PageHeader";
+import { SummaryCardsSkeleton, TrackRowSkeleton } from "@/components/common/Skeleton";
 
 // Stage display names and colors
 const STAGE_CONFIG: Record<string, { label: string; color: string }> = {
@@ -61,16 +63,7 @@ function SummaryCards() {
   const { summary, loadingSummary } = useOpsStore();
 
   if (loadingSummary || !summary) {
-    return (
-      <div className="ops-summary-grid">
-        {[1, 2, 3, 4].map((i) => (
-          <div key={i} className="ops-summary-card loading">
-            <div className="ops-summary-value">--</div>
-            <div className="ops-summary-label">Loading...</div>
-          </div>
-        ))}
-      </div>
-    );
+    return <SummaryCardsSkeleton />;
   }
 
   return (
@@ -214,7 +207,7 @@ function PriorityQueue() {
       </div>
 
       {loadingQueue ? (
-        <div className="ops-loading">Loading queue...</div>
+        <TrackRowSkeleton count={5} />
       ) : queue.length === 0 ? (
         <div className="ops-empty">No active tracks</div>
       ) : (
@@ -407,13 +400,21 @@ function DeliveryTracker() {
 // Main Operations View
 export default function OperationsView() {
   const { refreshAll, error } = useOpsStore();
+  const { subscribe } = useSSEContext();
 
   useEffect(() => {
-    refreshAll();
-    // Set up polling every 30 seconds
-    const interval = setInterval(refreshAll, 30000);
-    return () => clearInterval(interval);
-  }, [refreshAll]);
+    refreshAll(); // Initial fetch
+
+    const unsubs = [
+      subscribe("ops_updated", () => refreshAll()),
+      subscribe("programs_updated", () => refreshAll()),
+      subscribe("track_progress", (data) => {
+        // Optimistic update handled by store
+      }),
+    ];
+
+    return () => unsubs.forEach(fn => fn());
+  }, [refreshAll, subscribe]);
 
   return (
     <section className="ops-view">

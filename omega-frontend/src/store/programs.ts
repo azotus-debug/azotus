@@ -116,6 +116,7 @@ interface ProgramsStore {
     sendTrackToReview: (trackId: string) => Promise<boolean>;
     approveTrack: (trackId: string) => Promise<boolean>;
     revealFile: (trackId: string, fileType: 'video' | 'srt') => Promise<boolean>;
+    handleSSEEvent: (eventType: string, data: any) => void;
 }
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
@@ -295,6 +296,47 @@ export const useProgramsStore = create<ProgramsStore>((set, get) => ({
         } catch (e) {
             console.error("Failed to reveal file:", e);
             return false;
+        }
+    },
+
+    handleSSEEvent: (eventType: string, data: any) => {
+        const { fetchPrograms, fetchActiveTracks, fetchPipelineStats, fetchDeliveries } = get();
+
+        switch (eventType) {
+            case "programs_updated":
+                fetchPrograms();
+                break;
+            case "tracks_updated":
+                fetchActiveTracks();
+                fetchPrograms();
+                break;
+            case "pipeline_updated":
+                fetchPipelineStats();
+                break;
+            case "deliveries_updated":
+                fetchDeliveries();
+                break;
+            case "track_progress": {
+                // Optimistic in-place update of a single track's progress
+                const { track_id, progress, status, stage } = data || {};
+                if (!track_id) break;
+                set((state) => ({
+                    programs: state.programs.map((program) => ({
+                        ...program,
+                        tracks: program.tracks.map((track) =>
+                            track.id === track_id
+                                ? {
+                                      ...track,
+                                      ...(progress !== undefined && { progress }),
+                                      ...(status !== undefined && { status }),
+                                      ...(stage !== undefined && { stage }),
+                                  }
+                                : track
+                        ),
+                    })),
+                }));
+                break;
+            }
         }
     },
 }));

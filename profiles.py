@@ -211,7 +211,24 @@ PROFILES = {
     "standard": {
         "name": "Standard (Omega TV)",
         "tone": "Professional, Accurate, Broadcast-Quality.",
-        "glossary": {} 
+        "glossary": {
+            "God": {"is": "Guð", "es": "Dios", "nl": "God"},
+            "Jesus": {"is": "Jesús", "es": "Jesús", "nl": "Jezus"},
+            "Jesus Christ": {"is": "Jesús Kristur", "es": "Jesucristo", "nl": "Jezus Christus"},
+            "Holy Spirit": {"is": "Heilagur andi", "es": "Espíritu Santo", "nl": "Heilige Geest"},
+            "Cross": {"is": "krossinn", "es": "la cruz", "nl": "het kruis"},
+            "Salvation": {"is": "hjálpræði", "es": "salvación", "nl": "verlossing"},
+            "Redemption": {"is": "endurlausn", "es": "redención", "nl": "verlossing"},
+            "Grace": {"is": "náð", "es": "gracia", "nl": "genade"},
+            "Sin": {"is": "synd", "es": "pecado", "nl": "zonde"},
+            "Repentance": {"is": "iðrun", "es": "arrepentimiento", "nl": "bekering"},
+            "Gospel": {"is": "fagnaðarerindi", "es": "evangelio", "nl": "evangelie"},
+            "Scripture": {"is": "Ritningin", "es": "la Escritura", "nl": "de Schrift"},
+            "Sermon": {"is": "predikun", "es": "sermón", "nl": "preek"},
+            "Sermons": {"is": "predikanir", "es": "sermones", "nl": "preken"},
+            "Prayer": {"is": "bæn", "es": "oración", "nl": "gebed"},
+            "Faith": {"is": "trú", "es": "fe", "nl": "geloof"}
+        }
     },
     "in_touch": {
         "name": "In Touch (Charles Stanley)",
@@ -264,22 +281,24 @@ def get_system_instruction(lang_code="is", profile_key="standard", extra_terms=N
     if extra_terms and isinstance(extra_terms, dict):
         active_glossary.update(extra_terms)
 
-    prompt = f"""PROGRAM: {profile['name']}
-TARGET LANGUAGE: {lang['name']}
+    prompt = f"""ROLE: You are the Lead Translator for Omega TV.
+CURRENT PROGRAM: **{profile['name']}**
+TARGET LANGUAGE: **{lang['name']}**
 
-TONE: {profile['tone']}
+--- TONE & STYLE (The Soul) ---
+Tone: {profile['tone']}
 
-LANGUAGE RULES:
+--- LANGUAGE RULES (The Physics) ---
 {lang['base_prompt']}
 
-GLOSSARY:
+--- GLOSSARY (STRICT — use these terms exactly) ---
 {json.dumps(active_glossary, indent=2, ensure_ascii=False)}
 
-UNIVERSAL RULES:
-1. MUSIC: If a segment is purely singing/lyrics or instrumental with no speech, output `{lang['music_prompt']}`. If speech is present over music, translate the speech.
-2. BREVITY: Prefer concise, natural phrasing. Remove filler words. Subtitles are read quickly.
-3. CAPITALIZATION: Use sentence case (not ALL CAPS). Preserve acronyms (USA, TV, I-690) and mandated theological titles.
-4. ASR CLEANUP: If the source has an obvious speech-to-text error and the intended word is clear, fix it before translating."""
+--- UNIVERSAL RULES ---
+1. MUSIC: If a segment is purely singing/lyrics or instrumental with no speech, output `{lang['music_prompt']}`. If speech is present over music (e.g., organ under speech), translate the speech and do NOT output `{lang['music_prompt']}`.
+2. BREVITY (Broadcast): Prefer concise, natural phrasing; remove filler; keep sentences tight to reduce CPS.
+3. CAPITALIZATION (Broadcast): Use normal sentence case (not ALL CAPS). If the source segment is ALL CAPS, convert it to natural casing. Preserve acronyms/initialisms (e.g., USA, TV, I-690), Bible abbreviations, and mandatory theological titles (e.g., ÉG ER / YO SOY).
+4. ASR CLEANUP: If the source contains an obvious speech-to-text error and the intended word is clear, fix it before translating. If unsure, keep the original wording."""
     
     return prompt
 
@@ -591,4 +610,3 @@ def get_entity_anchors(entities: list, lang_code: str) -> dict:
             # (We don't add to anchors, model handles it)
 
     return anchors
-
