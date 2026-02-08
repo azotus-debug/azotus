@@ -69,6 +69,26 @@ SPEECH_GAP_THRESHOLD = 0.3  # Minimum speech gap to allow scene snap (seconds)
 CONTEXT_GAP_MAX = 3.0
 MAX_PRIORITY_SEGMENTS = 120
 
+# --- DURATION HINT CATEGORIES ---
+# Signals to the LLM about how much screen time each segment has.
+# Categories avoid raw CPS numbers which confused the model in earlier designs.
+DURATION_VERY_SHORT = 2.0   # Under 2.0s: maximally condensed phrasing needed
+DURATION_SHORT = 3.5        # 2.0-3.5s: concise phrasing preferred
+DURATION_NORMAL = 6.0       # 3.5-6.0s: natural phrasing fine
+# Above 6.0s: "long" -- full natural expression
+
+
+def get_duration_hint(duration_seconds: float) -> str:
+    """Categorize a segment's duration into a hint for the LLM translator."""
+    if duration_seconds < DURATION_VERY_SHORT:
+        return "very_short"
+    elif duration_seconds < DURATION_SHORT:
+        return "short"
+    elif duration_seconds < DURATION_NORMAL:
+        return "normal"
+    else:
+        return "long"
+
 
 def get_cps_for_language(lang_code: str) -> Tuple[float, float]:
     """Get (ideal_cps, tight_cps) for a language code."""

@@ -23,6 +23,7 @@ from vertexai.generative_models import (
 import config
 import profiles
 from gcp_auth import ensure_google_application_credentials
+from subtitle_standards import get_duration_hint
 from gcs_jobs import (
     GcsJobPaths,
     backoff_sleep,
@@ -672,13 +673,19 @@ def _translate_chunk_once(
     visual_context: str = "",
     visual_anchors: dict = None,
 ) -> list[dict]:
-    # Build input payload with speaker information for gender-aware translation
+    # Build input payload with speaker and timing information
     input_payload = []
     for seg in chunk:
         item = {"id": int(seg["id"]), "text": str(seg.get("text") or "").strip()}
         # Include speaker ID if available (for gender/voice distinction)
         if seg.get("speaker"):
             item["speaker"] = seg["speaker"]
+        # Include duration hint for length-aware translation
+        seg_start = float(seg.get("start") or 0)
+        seg_end = float(seg.get("end") or seg_start)
+        seg_duration = max(0.0, seg_end - seg_start)
+        if seg_duration > 0:
+            item["timing"] = get_duration_hint(seg_duration)
         input_payload.append(item)
 
     continuity_payload = [
@@ -755,35 +762,60 @@ GENDER AGREEMENT ({target_language_name} requires grammatical gender):
 - When unsure, prefer natural-sounding phrasing over strict gender matching.
 """
 
-    prompt = f"""ROLE: Lead Translator for Omega TV — professional broadcast subtitles.
+    prompt = f"""ROLE: You are the Lead Translator for Omega TV (Professional Broadcast Subtitles).
 
+SYSTEM INSTRUCTION (obey strictly):
 {system_instruction}
 
-TASK: Translate the INPUT segments into natural, spoken {target_language_name}.
+TASK:
+1. Translate the INPUT segments into natural, spoken {target_language_name}.
+2. Ensure the translation flows smoothly across segment boundaries.
+3. Respect the TONE and KEYWORDS from the Document Brief if provided.
+4. Return ONLY a valid JSON array of objects: {{ "id": <int>, "text": <string> }}.
+5. STRICTLY preserve all IDs from the input. No extras, none missing.
 
-TRANSLATION PRINCIPLES:
-1. Translate MEANING, not words. Produce natural {target_language_name} a native speaker would use.
-2. Be concise. Subtitles are read quickly — prefer tight phrasing over wordy literalism.
-3. Maintain flow across segment boundaries. Each segment should read naturally after the previous one.
-4. Use standard sentence case. Never output ALL CAPS (preserve acronyms: USA, TV, I-690).
-5. Keep proper nouns, mandated titles, and glossary terms exactly as specified.
+STYLE GUIDELINES:
+- **Natural Flow**: Translate meaning, not just words. Avoid "Translationese". Produce natural {target_language_name} a native speaker would use.
+- **Conciseness**: Subtitles must be readable. Condensed phrasing is preferred over wordy literalism.
+- **Formatting**: Do NOT use ALL CAPS. Use standard sentence case. Preserve acronyms (USA, TV, I-690).
+- **Terminology**: Keep proper nouns, mandated titles, and glossary terms exactly as specified.
 
-CONTENT PRESERVATION (strict):
-- Translate ALL segments faithfully. Never omit, censor, or skip content.
-- Every input ID must appear in your output. No extras, none missing.
+TIMING-AWARE CONDENSATION:
+Each input segment has a "timing" field indicating how much screen time is available:
+- "very_short": Maximum condensation needed. Drop fillers ("you know", "well", "I mean"), tag questions, and repetitions entirely. Use the shortest natural phrasing possible. Every word must earn its place.
+- "short": Concise phrasing. Drop fillers and redundant phrases. Prefer compact constructions.
+- "normal": Natural phrasing. Standard broadcast quality. Minor condensation of fillers is still good.
+- "long": Full natural translation. No condensation pressure.
+When condensing, NEVER drop core meaning, theological terms, names, or scripture references. Cut spoken-language redundancy first: filler words, hedging phrases, self-corrections, tag questions, and unnecessary repetitions.
 
-MULTIMODAL CONTEXT:
-- You have the video and audio. If the transcript conflicts with what you hear or see, trust your ears/eyes.
-- Use on-screen text (lower-thirds, graphics) for names, places, and scripture references.
-- Resolve ambiguous references ("this", "that", "here") using what is visible on screen.
+CRITICAL — CONTENT PRESERVATION:
+- NEVER omit, censor, or filter any segment. This is professional broadcast content.
+- Translate ALL content exactly as provided, including references to violence, politics, or sensitive topics.
+- News content about conflicts, protests, executions, or crises must be translated faithfully.
+- Do NOT skip segments or return empty translations. Every input segment MUST have a translation.
+- NEVER drop core theological meaning. Terms and concepts like God, Jesus Christ, Holy Spirit, salvation, redemption, grace, sin, repentance, gospel, scripture, sermon, prayer, and faith must be preserved when present.
+- Do not leave incomplete sentence fragments that lose nouns or final theological meaning.
+
+MULTIMODAL PRIORITY (video + audio):
+- You have access to the video/audio context cache.
+- If transcript conflicts with audio or visuals, correct it. Trust your ears/eyes.
+- Use on-screen OCR (lower-thirds, graphics) for names, places, and scripture references.
+- Resolve deixis ("this/that/here") using what is shown on screen.
+VISUAL CONTEXT (current scene):
 {visual_context}
 {gender_instruction}
 {brief_block}{anchors_block}{speaker_block}
-CONTINUITY (preceding translated segments — for flow and consistency only):
+CONTINUITY CONTEXT (Preceding segments — for flow only):
 {json.dumps(continuity_payload, ensure_ascii=False)}
 
-INPUT SEGMENTS:
+INPUT SEGMENTS (Translate these):
 {json.dumps(input_payload, ensure_ascii=False)}
+
+FINAL SELF-CHECK BEFORE OUTPUT:
+1. Every input ID appears exactly once in output.
+2. No segment is blank.
+3. No segment drops key nouns/concepts from the source.
+4. Translation is complete (not abruptly cut off).
 
 Return ONLY a JSON array: [{{"id": <int>, "text": "<translation>"}}]"""
 
@@ -799,6 +831,17 @@ Return ONLY a JSON array: [{{"id": <int>, "text": "<translation>"}}]"""
         },
         temperature=0.25,
     )
+
+    # Enable Gemini thinking mode for deeper reasoning on condensation and phrasing
+    thinking_budget = int(os.environ.get("OMEGA_CLOUD_THINKING_BUDGET", "8192") or 0)
+    if thinking_budget > 0:
+        try:
+            from google.cloud.aiplatform_v1beta1.types import GenerationConfig as _ProtoGenConfig
+            generation_config._raw_generation_config.thinking_config = (
+                _ProtoGenConfig.ThinkingConfig(thinking_budget=thinking_budget)
+            )
+        except Exception:
+            pass  # SDK version may not support thinking — degrade gracefully
 
     response = _vertex_generate(
         model,
@@ -833,6 +876,22 @@ Return ONLY a JSON array: [{{"id": <int>, "text": "<translation>"}}]"""
     missing = [seg_id for seg_id in expected_ids if seg_id not in result_map]
     if missing:
         raise ValueError(f"Missing IDs in model response: {sorted(missing)[:8]}")
+
+    # Omission guard: reject obviously incomplete outputs before downstream review.
+    for seg in input_payload:
+        seg_id = int(seg.get("id"))
+        source_text = str(seg.get("text") or "").strip()
+        translated_text = str(result_map.get(seg_id) or "").strip()
+        if not translated_text:
+            raise ValueError(f"Empty translation for id={seg_id}")
+        source_word_count = len(_WORD_RE.findall(source_text))
+        translated_word_count = len(_WORD_RE.findall(translated_text))
+        # If the source is substantial and translation is only 1-2 words, this is usually an omission.
+        if source_word_count >= 8 and translated_word_count <= 2:
+            raise ValueError(
+                f"Suspiciously short translation for id={seg_id} "
+                f"(source_words={source_word_count}, translated_words={translated_word_count})"
+            )
 
     ordered_ids = _iter_input_ids(input_payload)
     return [{"id": seg_id, "text": result_map[seg_id]} for seg_id in ordered_ids]
@@ -1192,14 +1251,30 @@ def _write_progress(
     progress: float,
     meta: Optional[dict] = None,
 ) -> None:
+    progress_meta = dict(meta or {})
+    trace_id = str(progress_meta.get("trace_id") or "").strip()
     payload = {
         "stage": stage,
         "status": status,
         "progress": float(progress),
         "updated_at": utc_iso_now(),
-        "meta": meta or {},
+        "meta": progress_meta,
     }
+    if trace_id:
+        payload["trace_id"] = trace_id
     upload_json(storage_client, bucket=paths.bucket, blob_name=paths.progress_json(), payload=payload)
+
+
+def _extract_trace_id(job: dict, job_id: str) -> str:
+    meta = job.get("meta") if isinstance(job.get("meta"), dict) else {}
+    value = (
+        job.get("trace_id")
+        or job.get("correlation_id")
+        or meta.get("trace_id")
+        or meta.get("correlation_id")
+        or job_id
+    )
+    return str(value or job_id).strip() or job_id
 
 
 
@@ -1223,9 +1298,24 @@ def run_job_2step(*, bucket: str, prefix: str, job_id: str) -> None:
         stage="CLOUD_STARTING",
         status="Job received",
         progress=5.0,
+        meta={"trace_id": job_id},
     )
 
     job = download_json(storage_client, bucket=paths.bucket, blob_name=paths.job_json())
+    trace_id = _extract_trace_id(job, job_id)
+    logger.info("☁️ Cloud job loaded: job_id=%s trace_id=%s", job_id, trace_id)
+
+    def write_progress(stage: str, status: str, progress: float, meta: Optional[dict] = None) -> None:
+        progress_meta = dict(meta or {})
+        progress_meta.setdefault("trace_id", trace_id)
+        _write_progress(
+            storage_client,
+            paths=paths,
+            stage=stage,
+            status=status,
+            progress=progress,
+            meta=progress_meta,
+        )
     # Support both field names: target_language_code (new) and target_language (legacy)
     target_language_code = str(
         job.get("target_language_code") or job.get("target_language") or job.get("language") or ""
@@ -1255,9 +1345,7 @@ def run_job_2step(*, bucket: str, prefix: str, job_id: str) -> None:
     doc_brief_chars = config.OMEGA_CLOUD_DOC_BRIEF_CHARS
     doc_brief_chars = max(2000, min(doc_brief_chars, 24000))
 
-    _write_progress(
-        storage_client,
-        paths=paths,
+    write_progress(
         stage="CLOUD_TRANSLATING",
         status="Loading skeleton",
         progress=40.0,
@@ -1323,9 +1411,7 @@ def run_job_2step(*, bucket: str, prefix: str, job_id: str) -> None:
     translator_model = GenerativeModel.from_cached_content(cached_content=cached_content)
     doc_brief = ""
     if doc_brief_enabled:
-        _write_progress(
-            storage_client,
-            paths=paths,
+        write_progress(
             stage="CLOUD_TRANSLATING",
             status="Summarizing program",
             progress=40.2,
@@ -1355,9 +1441,7 @@ def run_job_2step(*, bucket: str, prefix: str, job_id: str) -> None:
         logger.warning("   ⚠️ Checkpoint discarded; starting fresh translation")
 
     if music_detect:
-        _write_progress(
-            storage_client,
-            paths=paths,
+        write_progress(
             stage="CLOUD_DETECTING_MUSIC",
             status="Detecting music segments",
             progress=41.0,
@@ -1387,9 +1471,7 @@ def run_job_2step(*, bucket: str, prefix: str, job_id: str) -> None:
                     seg["music_hint"] = True
             for seg_id in applied_music_ids:
                 translated_map[str(seg_id)] = "(MUSIC)"
-        _write_progress(
-            storage_client,
-            paths=paths,
+        write_progress(
             stage="CLOUD_DETECTING_MUSIC",
             status=f"Marked {len(applied_music_ids)} music segments",
             progress=42.0,
@@ -1423,9 +1505,7 @@ def run_job_2step(*, bucket: str, prefix: str, job_id: str) -> None:
     if not to_translate and translated_map:
         logger.info("✅ Translation already complete; re-emitting draft from checkpoint.")
     else:
-        _write_progress(
-            storage_client,
-            paths=paths,
+        write_progress(
             stage="CLOUD_TRANSLATING",
             status=f"Translating ({target_language_code})",
             progress=_progress(total - len(to_translate)),
@@ -1477,9 +1557,7 @@ def run_job_2step(*, bucket: str, prefix: str, job_id: str) -> None:
                 blob_name=paths.translation_checkpoint_json(),
                 payload=checkpoint_payload,
             )
-            _write_progress(
-                storage_client,
-                paths=paths,
+            write_progress(
                 stage="CLOUD_TRANSLATING",
                 status=f"Translating ({done_count}/{total})",
                 progress=_progress(done_count),
@@ -1496,9 +1574,7 @@ def run_job_2step(*, bucket: str, prefix: str, job_id: str) -> None:
 
     review_segments = translated_segments
 
-    _write_progress(
-        storage_client,
-        paths=paths,
+    write_progress(
         stage="CLOUD_REVIEWING",
         status="Chief Editor reviewing",
         progress=60.0,
@@ -1519,9 +1595,7 @@ def run_job_2step(*, bucket: str, prefix: str, job_id: str) -> None:
     if use_chunked_review:
         # Chunked parallel review - 3-5x faster for long videos
         logger.info(f"   🚀 Using chunked parallel review ({len(segments)} segments > {chunked_review_threshold} threshold)")
-        _write_progress(
-            storage_client,
-            paths=paths,
+        write_progress(
             stage="CLOUD_REVIEWING",
             status=f"Chief Editor reviewing ({len(segments)} segments in parallel)",
             progress=60.0,
@@ -1597,14 +1671,13 @@ def run_job_2step(*, bucket: str, prefix: str, job_id: str) -> None:
             "rating": report.get("rating") if isinstance(report, dict) else None,
             "quality_tier": report.get("quality_tier") if isinstance(report, dict) else None,
             "generated_at": utc_iso_now(),
+            "trace_id": trace_id,
         },
     }
 
     upload_json(storage_client, bucket=paths.bucket, blob_name=paths.approved_json(), payload=approved_payload)
 
-    _write_progress(
-        storage_client,
-        paths=paths,
+    write_progress(
         stage="CLOUD_DONE",
         status="Approved",
         progress=70.0,
@@ -1643,11 +1716,18 @@ def _build_chunk_editor_prompt(
     if lang_label in {"ICELANDIC", "IS"}:
         rules = """CHECKS:
 1. God addressed as "Þú" (never "Þér"). Humans also "Þú".
-2. Anglicisms: "fyrir þig" → "vegna þín", "á eldi" → "brennandi", literal English syntax.
-3. Terminology: "Partners" → "Bakhjarlar", "I AM" → "ÉG ER", "Pastor" → "Prestur".
-4. ALL CAPS → sentence case (keep acronyms: USA, TV, ÉG ER).
-5. Natural phrasing: avoid "Við höfum fengið" for states; use "Það er/hefur verið".
-6. ASR homophones: "hole"→"hold", "Halloween"→"Hallowed" in religious context."""
+2. LEXICAL ANGLICISMS: "fyrir þig" → "vegna þín", "á eldi" → "brennandi".
+3. STRUCTURAL ANGLICISMS (critical — these make subtitles feel translated):
+   - English word order in subordinate clauses → use Icelandic V2 word order.
+   - Over-literal relative constructions: avoid "sá sem" when a simpler form works.
+   - Passive voice calques: "var verið að" → prefer active or impersonal constructions.
+   - Fronted English-style adverbs: "Augljóslega, hann..." → postpose in Icelandic.
+   - Progressive tense calques: "Er að gera" when simple present suffices → "Gerir".
+4. Terminology: "Partners" → "Bakhjarlar", "I AM" → "ÉG ER", "Pastor" → "Prestur".
+5. ALL CAPS → sentence case (keep acronyms: USA, TV, ÉG ER).
+6. Natural phrasing: avoid "Við höfum fengið" for states; use "Það er/hefur verið".
+7. ASR homophones: "hole"→"hold", "Halloween"→"Hallowed" in religious context.
+8. BREVITY: If a segment is correct but unnecessarily verbose, you MAY condense it for readability."""
     else:
         rules = f"""CHECKS:
 1. Natural {lang_label} flow — not translated English.
@@ -1659,6 +1739,7 @@ def _build_chunk_editor_prompt(
 
 TASK: Review {lang_label} translation for errors. Fix only what is wrong.
 Do NOT fix line length, CPS, or formatting — that is handled by post-processing.
+Priority: detect missing words/phrases and theological meaning loss before stylistic tweaks.
 
 {rules}
 
@@ -1875,17 +1956,23 @@ def _build_editor_prompt(*, source_segments: list[dict], translated_segments: li
     if lang_label in {"ICELANDIC", "IS"}:
         rules = """ICELANDIC-SPECIFIC CHECKS:
 1. ADDRESS FORMS: God is addressed as "Þú" (NEVER "Þér"). Humans also "Þú" (casual).
-2. ANGLICISM DETECTION (critical for Icelandic):
+2. LEXICAL ANGLICISMS:
    - "fyrir þig" (for you, spiritual) → "vegna þín"
    - "á eldi" (on fire) → "brennandi"
    - "Bless" (impartation) → "Guð blessi þig"
    - Literal "Við höfum fengið" for states → "Það er/hefur verið"
-   - Watch for English word order leaking into Icelandic syntax.
-3. TERMINOLOGY:
+3. STRUCTURAL ANGLICISMS (critical — these make subtitles feel translated):
+   - English word order in subordinate clauses → use Icelandic V2 word order.
+   - Over-literal relative constructions: avoid "sá sem" when simpler works.
+   - Passive voice calques: "var verið að" → prefer active or impersonal constructions.
+   - Fronted English-style adverbs: "Augljóslega, hann..." → postpose in Icelandic.
+   - Progressive tense calques: "Er að gera" when simple present suffices → "Gerir".
+4. TERMINOLOGY:
    - "Partners" → "Bakhjarlar", "I AM" → "ÉG ER", "Covenant" → "Sáttmáli", "Pastor" → "Prestur"
-4. ASR CONTEXTUAL CORRECTION:
+5. ASR CONTEXTUAL CORRECTION:
    - Fix homophones the transcriber got wrong: "hole" vs "hold", "Halloween" vs "Hallowed" in prayers.
-5. GENDER AGREEMENT: Ensure verb/adjective endings match the speaker's gender throughout."""
+6. GENDER AGREEMENT: Ensure verb/adjective endings match the speaker's gender throughout.
+7. BREVITY REWRITES: If a segment is correct but unnecessarily verbose for subtitle reading, you MAY condense it. Shorter natural phrasing is always preferred over wordy accuracy."""
     else:
         rules = f"""LANGUAGE-SPECIFIC CHECKS ({lang_label}):
 1. NATURAL FLOW: Ensure translations sound like native {lang_label}, not translated English.
@@ -1909,7 +1996,8 @@ WHAT NOT TO FIX:
 - Line length, line breaks, or character counts (handled by post-processing).
 - Reading speed or CPS (handled by post-processing).
 - Dialogue dashes or punctuation formatting (handled by post-processing).
-- Segments that are already correct — do not "improve" working translations.
+- Segments that are already correct and concise — do not "improve" working translations.
+  EXCEPTION: If a correct segment is unnecessarily verbose, you MAY condense it for subtitle readability.
 
 {rules}
 
@@ -2022,6 +2110,7 @@ def _start_deadman_timer(bucket: str, prefix: str, job_id: str, max_seconds: int
                 stage="CLOUD_ERROR",
                 status=f"Deadman timer: exceeded {max_seconds}s",
                 progress=0.0,
+                meta={"trace_id": job_id},
             )
         except Exception:
             pass
@@ -2072,6 +2161,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 stage="CLOUD_ERROR",
                 status=f"Error: {exc}",
                 progress=0.0,
+                meta={"trace_id": args.job_id},
             )
         except Exception:
             pass

@@ -11,6 +11,7 @@ import config
 import omega_db
 from subtitle_standards import (
     MAX_CHARS_PER_LINE,
+    MAX_CHARS_TOTAL,
     MAX_LINES,
     MIN_DURATION,
     MAX_DURATION,
@@ -433,9 +434,15 @@ def _strip_metadata_tags(text: str) -> str:
         return match.group(0)
 
     cleaned = re.sub(r'\(([^)]+)\)', _replace_paren, cleaned)
-    cleaned = re.sub(r'\s+', ' ', cleaned)
 
-    return cleaned.strip()
+    # Preserve subtitle line breaks while normalizing in-line whitespace.
+    # A global `\s+` collapse would erase newlines and break 2-line formatting.
+    normalized_lines = []
+    for raw_line in cleaned.splitlines():
+        line = re.sub(r"[ \t]+", " ", raw_line).strip()
+        if line:
+            normalized_lines.append(line)
+    return "\n".join(normalized_lines).strip()
 
 
 def _is_audio_event(segment: dict) -> bool:
@@ -747,28 +754,65 @@ def split_into_balanced_lines(text, target_language="is"):
                 logger.debug(f"   📐 Rebalanced to prevent widow: '{lines[1][:15]}...'")
 
     # FINAL ENFORCEMENT: Ensure no line exceeds MAX_CHARS_PER_LINE (42)
-    # This catches edge cases from fallback splits
+    # This catches edge cases from fallback splits.
+    # IMPORTANT: never drop content here.
     final_lines = []
     for line in lines:
-        if len(line) > MAX_CHARS_PER_LINE:
-            # Force split at max length, finding nearest space
-            split_pos = line.rfind(' ', 0, MAX_CHARS_PER_LINE)
-            if split_pos > 10:  # Found a reasonable space
-                final_lines.append(line[:split_pos].strip())
-                remainder = line[split_pos:].strip()
-                if remainder:
-                    final_lines.append(remainder)
-            else:
-                # No good space found - hard truncate with ellipsis
-                final_lines.append(line[:MAX_CHARS_PER_LINE-1] + "…")
-            logger.warning(f"   ⚠️ Line exceeded {MAX_CHARS_PER_LINE} chars, force split: '{line[:30]}...'")
-        else:
-            final_lines.append(line)
+        remainder = line.strip()
+        if not remainder:
+            continue
 
-    # Limit to 2 lines max for broadcast
+        while len(remainder) > MAX_CHARS_PER_LINE:
+            split_pos = remainder.rfind(' ', 0, MAX_CHARS_PER_LINE + 1)
+            if split_pos <= 10:
+                # No usable space boundary - hard split, but preserve all text.
+                split_pos = MAX_CHARS_PER_LINE
+
+            chunk = remainder[:split_pos].strip()
+            if chunk:
+                final_lines.append(chunk)
+            remainder = remainder[split_pos:].strip()
+
+        if remainder:
+            final_lines.append(remainder)
+
+    # Limit to MAX_LINES for broadcast without dropping words.
+    # If extra lines are produced, try abbreviation first, then fold overflow.
     if len(final_lines) > MAX_LINES:
-        final_lines = final_lines[:MAX_LINES]
-        logger.warning(f"   ⚠️ Truncated to {MAX_LINES} lines")
+        joined = " ".join(final_lines).strip()
+        condensed = abbreviate_bible_refs(joined, target_language)
+
+        if len(condensed) < len(joined):
+            # Abbreviation helped -- try re-splitting
+            logger.debug(f"   📐 Overflow condensation: {len(joined)} → {len(condensed)} chars via abbreviation")
+            if len(condensed) <= MAX_CHARS_PER_LINE:
+                final_lines = [condensed]
+            else:
+                mid = len(condensed) // 2
+                split_pos = condensed.rfind(' ', 0, mid + 10)
+                if split_pos <= 5:
+                    split_pos = condensed.find(' ', mid)
+                if split_pos > 0:
+                    candidate = [condensed[:split_pos].strip(), condensed[split_pos:].strip()]
+                else:
+                    candidate = [condensed]
+                if len(candidate) <= MAX_LINES and all(len(l) <= MAX_CHARS_PER_LINE for l in candidate):
+                    final_lines = candidate
+                else:
+                    # Abbreviation not enough -- fold as before
+                    overflow = " ".join(final_lines[MAX_LINES - 1 :]).strip()
+                    final_lines = final_lines[: MAX_LINES - 1] + [overflow]
+                    logger.warning(
+                        f"   ⚠️ Folded overflow into line {MAX_LINES} to preserve content "
+                        f"(text exceeds {MAX_LINES} lines even after abbreviation)"
+                    )
+        else:
+            overflow = " ".join(final_lines[MAX_LINES - 1 :]).strip()
+            final_lines = final_lines[: MAX_LINES - 1] + [overflow]
+            logger.warning(
+                f"   ⚠️ Folded overflow into line {MAX_LINES} to preserve content "
+                f"(text exceeds {MAX_LINES} lines)"
+            )
 
     return final_lines
 
@@ -1467,9 +1511,8 @@ def normalize_segments_for_review(
         duration = current['end'] - current['start']
         cps = char_count / duration if duration > 0 else 999
 
-        TARGET_CPS = 21.0
-        if cps > TARGET_CPS:
-            required_duration = char_count / TARGET_CPS
+        if cps > tight_cps:
+            required_duration = char_count / tight_cps
             potential_end = current['start'] + required_duration
             if potential_end <= max_end_time:
                 current['end'] = potential_end
@@ -1533,16 +1576,19 @@ def normalize_segments_for_review(
 def segments_to_srt(
     segments: list[dict],
     output_path: Path,
+    target_language: str = "is",
 ) -> Path:
     """
     Convert normalized segments directly to SRT file.
 
     This is used after review approval to generate the final SRT.
-    The segments should already be normalized (via normalize_segments_for_review).
+    Applies split_into_balanced_lines() to enforce the 42-char-per-line
+    broadcast standard, even if segments were pre-normalized.
 
     Args:
         segments: List of normalized segments with {start, end, text/lines} fields
         output_path: Path for the output SRT file
+        target_language: ISO language code for line-break rules (default: "is")
 
     Returns:
         Path to the created SRT file
@@ -1560,6 +1606,14 @@ def segments_to_srt(
         else:
             text = segment.get('text', '')
 
+        # Enforce line breaking: even pre-normalized segments may have
+        # single-line text exceeding MAX_CHARS_PER_LINE (42).
+        # Flatten to single line first, then split properly.
+        flat_text = text.replace('\n', ' ').strip()
+        if flat_text:
+            lines = split_into_balanced_lines(flat_text, target_language)
+            text = '\n'.join(lines)
+
         srt_blocks.append(f"{i+1}\n{format_timestamp(start)} --> {format_timestamp(end)}\n{text}\n\n")
 
     with open(output_path, "w", encoding="utf-8") as f:
@@ -1567,6 +1621,84 @@ def segments_to_srt(
 
     logger.info(f"✅ Created SRT: {output_path.name}")
     return output_path
+
+
+_TOKEN_RE = re.compile(r"[A-Za-z0-9À-ÖØ-öø-ÿ']+")
+
+
+def _tokenize_text(text: str) -> list[str]:
+    return [token.lower() for token in _TOKEN_RE.findall(text or "")]
+
+
+def _load_approved_segments(approved_path: Path) -> list[dict]:
+    with open(approved_path, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if isinstance(payload, dict):
+        segments = payload.get("segments", [])
+        if isinstance(segments, list):
+            return segments
+        return []
+    if isinstance(payload, list):
+        return payload
+    return []
+
+
+def _extract_srt_text(srt_path: Path) -> str:
+    with open(srt_path, "r", encoding="utf-8") as handle:
+        content = handle.read()
+    blocks = [block for block in content.strip().split("\n\n") if block.strip()]
+    text_parts = []
+    for block in blocks:
+        lines = block.splitlines()
+        if len(lines) < 3:
+            continue
+        text_lines = [line.replace("{\\an8}", "").strip() for line in lines[2:]]
+        text = " ".join([line for line in text_lines if line]).strip()
+        if text:
+            text_parts.append(text)
+    return " ".join(text_parts)
+
+
+def compute_srt_text_coverage(
+    approved_path: Path,
+    srt_path: Path,
+    min_ratio: float = 0.995,
+) -> dict:
+    """
+    Compare approved JSON text against generated SRT text.
+    Returns token-level coverage so burn can fail fast on omissions.
+    """
+    approved_segments = _load_approved_segments(approved_path)
+    approved_text = " ".join(str(seg.get("text", "")).strip() for seg in approved_segments if isinstance(seg, dict))
+    srt_text = _extract_srt_text(srt_path)
+
+    approved_tokens = _tokenize_text(approved_text)
+    srt_tokens = _tokenize_text(srt_text)
+
+    approved_counter = Counter(approved_tokens)
+    srt_counter = Counter(srt_tokens)
+
+    total_tokens = sum(approved_counter.values())
+    missing_counter = Counter()
+    for token, required in approved_counter.items():
+        available = srt_counter.get(token, 0)
+        if available < required:
+            missing_counter[token] = required - available
+
+    missing_tokens = sum(missing_counter.values())
+    coverage_ratio = 1.0
+    if total_tokens > 0:
+        coverage_ratio = 1.0 - (missing_tokens / total_tokens)
+
+    missing_samples = [token for token, _count in missing_counter.most_common(20)]
+    return {
+        "passed": coverage_ratio >= float(min_ratio),
+        "min_ratio": round(float(min_ratio), 6),
+        "coverage_ratio": round(float(coverage_ratio), 6),
+        "total_tokens": int(total_tokens),
+        "missing_tokens": int(missing_tokens),
+        "missing_samples": missing_samples,
+    }
 
 
 def finalize(
@@ -1971,12 +2103,10 @@ def finalize(
         full_char_count = len(full_text.replace('\n', ' '))
         final_cps_check = full_char_count / final_duration if final_duration > 0 else 999
 
-        # Target CPS for comfortable reading (industry standard allows up to 25)
-        TARGET_CPS = 21.0
-
-        if final_cps_check > TARGET_CPS:
-            # Extend duration to meet CPS target
-            required_duration = full_char_count / TARGET_CPS
+        # CPS target: use language-specific tight_cps (not a generic hardcode)
+        if final_cps_check > tight_cps:
+            # Extend duration to meet language-specific CPS target
+            required_duration = full_char_count / tight_cps
             potential_end = current['start'] + required_duration
 
             # Check if we can extend without overlapping next subtitle
@@ -1995,8 +2125,8 @@ def finalize(
                     final_cps_check = full_char_count / final_duration if final_duration > 0 else 999
 
                 # Log high CPS but NEVER truncate - the text must remain complete
-                if final_cps_check > TARGET_CPS:
-                    logger.warning(f"   ⚠️ High CPS ({final_cps_check:.1f}) - no room to extend: {current['text'][:40]}...")
+                if final_cps_check > tight_cps:
+                    logger.warning(f"   ⚠️ High CPS ({final_cps_check:.1f} > {tight_cps}) - no room to extend: {current['text'][:40]}...")
 
         # Check Graphic Zones for positioning
         position_tag = ""
@@ -2146,8 +2276,34 @@ def finalize(
                 if next_event['start'] >= next_event.get('end', 0):
                     next_event['end'] = next_event['start'] + MIN_SUBTITLE_DURATION
 
-    if timing_errors or overlap_fixes:
-        logger.warning(f"   ⚠️ Fixed {len(timing_errors)} timing errors and {len(overlap_fixes)} overlaps before saving")
+    # Fix 3: Enforce minimum gap between consecutive subtitles
+    gap_fixes = []
+    for i in range(len(normalized_events) - 1):
+        current_event = normalized_events[i]
+        next_event = normalized_events[i + 1]
+        current_end = current_event.get('end', 0)
+        next_start = next_event.get('start', 0)
+        gap = next_start - current_end
+
+        if 0 <= gap < GAP_SECONDS:
+            # Shorten current subtitle's end time to create the minimum gap
+            new_end = next_start - GAP_SECONDS
+            new_duration = new_end - current_event.get('start', 0)
+
+            if new_duration >= MIN_SUBTITLE_DURATION:
+                gap_fixes.append((i + 1, current_end, new_end))
+                current_event['end'] = new_end
+            else:
+                logger.debug(
+                    f"   ℹ️ Subtitle {i+1} gap ({gap:.3f}s) below minimum but cannot shorten "
+                    f"without violating min duration ({new_duration:.3f}s < {MIN_SUBTITLE_DURATION}s)"
+                )
+
+    if gap_fixes:
+        logger.info(f"   📏 Enforced minimum gap ({GAP_SECONDS}s) on {len(gap_fixes)} subtitle pairs")
+
+    if timing_errors or overlap_fixes or gap_fixes:
+        logger.warning(f"   ⚠️ Fixed {len(timing_errors)} timing errors, {len(overlap_fixes)} overlaps, and {len(gap_fixes)} gaps before saving")
         # Rebuild SRT blocks with corrected timing
         final_srt_blocks = []
         for i, event in enumerate(normalized_events):
