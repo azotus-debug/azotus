@@ -13,6 +13,30 @@ if [ -f "$FRONTEND_PID_FILE" ]; then
     rm -f "$FRONTEND_PID_FILE"
 fi
 
+# Kill any orphaned Next.js frontend processes for this workspace
+FRONTEND_PATH_PATTERN="/Users/haukurhauksson/Azotus/omega-frontend/node_modules/.bin/next"
+pids=$(ps aux | grep "$FRONTEND_PATH_PATTERN" | awk '{print $2}')
+if [ -n "$pids" ]; then
+    echo "   Killing orphaned Next.js PIDs: $pids"
+    kill -9 $pids 2>/dev/null
+fi
+
+# Kill orphaned next-server workers for this workspace only
+NEXT_SERVER_PIDS=$(ps aux | awk '/[n]ext-server/{print $2}')
+LOCAL_NEXT_SERVER_PIDS=""
+for pid in $NEXT_SERVER_PIDS; do
+    cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)
+    case "$cwd" in
+        */Azotus/omega-frontend*)
+            LOCAL_NEXT_SERVER_PIDS="$LOCAL_NEXT_SERVER_PIDS $pid"
+            ;;
+    esac
+done
+if [ -n "$LOCAL_NEXT_SERVER_PIDS" ]; then
+    echo "   Killing orphaned next-server PIDs:$LOCAL_NEXT_SERVER_PIDS"
+    kill -9 $LOCAL_NEXT_SERVER_PIDS 2>/dev/null
+fi
+
 # Kill Watchdog
 WATCHDOG_PID_FILE="/tmp/omega_watchdog.pid"
 if [ -f "$WATCHDOG_PID_FILE" ]; then
@@ -22,6 +46,24 @@ if [ -f "$WATCHDOG_PID_FILE" ]; then
         kill -9 "$pid" 2>/dev/null
     fi
     rm -f "$WATCHDOG_PID_FILE"
+fi
+
+# Kill Watchdog Supervisor
+WATCHDOG_SUP_PID_FILE="/tmp/omega_watchdog_supervisor.pid"
+if [ -f "$WATCHDOG_SUP_PID_FILE" ]; then
+    pid=$(cat "$WATCHDOG_SUP_PID_FILE" 2>/dev/null)
+    if [ -n "$pid" ]; then
+        echo "   Killing watchdog supervisor PID: $pid"
+        kill -9 "$pid" 2>/dev/null
+    fi
+    rm -f "$WATCHDOG_SUP_PID_FILE"
+fi
+
+# Kill process_watchdog.py (fallback)
+pids=$(ps aux | grep "[p]rocess_watchdog.py" | awk '{print $2}')
+if [ -n "$pids" ]; then
+    echo "   Killing process_watchdog.py PIDs: $pids"
+    kill -9 $pids 2>/dev/null
 fi
 
 # Kill Cloud Sync daemon
@@ -39,6 +81,13 @@ fi
 pids=$(ps aux | grep "[c]loud_sync_service.py" | awk '{print $2}')
 if [ -n "$pids" ]; then
     echo "   Killing cloud_sync_service.py PIDs: $pids"
+    kill -9 $pids 2>/dev/null
+fi
+
+# Kill watchdog_supervisor.py (fallback)
+pids=$(ps aux | grep "[w]atchdog_supervisor.py" | awk '{print $2}')
+if [ -n "$pids" ]; then
+    echo "   Killing watchdog_supervisor.py PIDs: $pids"
     kill -9 $pids 2>/dev/null
 fi
 

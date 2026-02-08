@@ -16,20 +16,7 @@ COPY subtitle_standards.py /app/subtitle_standards.py
 COPY utils/ /app/utils/
 
 # Sanity check: fail build if required modules are missing.
-RUN python - <<'PY'
-import importlib
-required = [
-    "config",
-    "subtitle_standards",
-    "gcp_auth",
-    "gcs_jobs",
-    "utils.circuit_breaker",
-    "omega_cloud_worker",
-]
-for mod in required:
-    importlib.import_module(mod)
-print("Cloud worker import check: OK")
-PY
+RUN python -c "import importlib; [importlib.import_module(m) for m in ['config', 'subtitle_standards', 'gcp_auth', 'gcs_jobs', 'utils.circuit_breaker', 'omega_cloud_worker']]; print('Cloud worker import check: OK')"
 
 ENV PYTHONUNBUFFERED=1
 

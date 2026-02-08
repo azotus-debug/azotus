@@ -75,6 +75,37 @@ class TransitionError(Exception):
         super().__init__(message)
 
 
+def _resolve_track_id(job_id: Optional[str], job_stem: Optional[str]) -> Optional[str]:
+    """
+    Resolve the canonical track UUID for audit logging.
+
+    execute_transition() callers may pass either a track ID or a job stem as
+    `job_id`; this helper normalizes to the actual track id used by the DB.
+    """
+    candidates = []
+    if job_id:
+        candidates.append(str(job_id))
+    if job_stem and str(job_stem) not in candidates:
+        candidates.append(str(job_stem))
+
+    for candidate in candidates:
+        try:
+            direct_track = omega_db.get_track(candidate)
+            if direct_track and direct_track.get("id"):
+                return str(direct_track["id"])
+        except Exception as exc:
+            logger.debug("Track lookup by id failed for %s: %s", candidate, exc)
+
+        try:
+            by_job = omega_db.get_track_by_job(candidate)
+            if by_job and by_job.get("id"):
+                return str(by_job["id"])
+        except Exception as exc:
+            logger.debug("Track lookup by job_id failed for %s: %s", candidate, exc)
+
+    return None
+
+
 def execute_transition(
     job_id: str,
     job_stem: str,
@@ -230,17 +261,26 @@ def execute_transition(
 
     # Step 2: Write to audit log (always attempted, errors are non-fatal)
     try:
-        omega_db.log_stage_transition(
-            track_id=job_id,
-            job_stem=job_stem,
-            from_stage=from_stage,
-            to_stage=to_stage,
-            processing_step=processing_step,
-            worker_id=worker_id,
-            reason=reason,
-        )
-        result["audit_logged"] = True
-        logger.debug(f"Audit log recorded for {job_stem}: {from_stage} -> {to_stage}")
+        track_id = _resolve_track_id(job_id=job_id, job_stem=job_stem)
+        if not track_id:
+            error_msg = (
+                f"Skipped audit log for {job_stem}: unable to resolve track_id "
+                f"(job_id={job_id})"
+            )
+            logger.warning(error_msg)
+            result["audit_error"] = error_msg
+        else:
+            omega_db.log_stage_transition(
+                track_id=track_id,
+                job_stem=job_stem,
+                from_stage=from_stage,
+                to_stage=to_stage,
+                processing_step=processing_step,
+                worker_id=worker_id,
+                reason=reason,
+            )
+            result["audit_logged"] = True
+            logger.debug(f"Audit log recorded for {job_stem}: {from_stage} -> {to_stage}")
 
     except Exception as e:
         # Audit logging failure is non-fatal - log the error but continue

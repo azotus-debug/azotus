@@ -16,10 +16,55 @@ from gcp_auth import ensure_google_application_credentials
 from gcs_jobs import GcsJobPaths, blob_exists, download_json, try_download_json
 from lock_manager import ProcessLock
 from profiles import LANGUAGES
+from artifact_lock import job_artifact_lock
 
 LOG = logging.getLogger("OmegaCloudSync")
 
 JOB_ID_TS_RE = re.compile(r"^(?P<stem>.+)-(?P<ts>\d{8}T\d{12}Z)$")
+DB_ERROR_PATTERNS = (
+    "connection",
+    "timeout",
+    "operational",
+    "closed",
+    "reset by peer",
+    "broken pipe",
+    "ssl",
+    "eof",
+    "unavailable",
+    "too many connections",
+    "connection refused",
+    "could not connect",
+)
+
+
+def _config_int(name: str, default: int) -> int:
+    value = getattr(config, name, os.environ.get(name))
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _config_float(name: str, default: float) -> float:
+    value = getattr(config, name, os.environ.get(name))
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _is_db_error(exc: Exception) -> bool:
+    msg = str(exc or "").lower()
+    if any(pattern in msg for pattern in DB_ERROR_PATTERNS):
+        return True
+    cause = getattr(exc, "__cause__", None) or getattr(exc, "__context__", None)
+    if cause and cause is not exc:
+        return _is_db_error(cause)
+    return False
+
+
+CLOUD_SYNC_DB_FAILURE_THRESHOLD = max(1, _config_int("OMEGA_CLOUD_SYNC_DB_FAILURE_THRESHOLD", 3))
+CLOUD_SYNC_DB_COOLDOWN_SECONDS = max(30.0, _config_float("OMEGA_CLOUD_SYNC_DB_COOLDOWN_SECONDS", 300.0))
 
 STAGE_ORDER = {
     "QUEUED": 10,
@@ -284,6 +329,18 @@ def _extract_job_context(job_id: str, payload: Optional[dict]) -> dict:
         raw_meta = payload.get("meta")
         if isinstance(raw_meta, dict):
             meta = raw_meta
+    trace_id = job_id
+    if isinstance(payload, dict):
+        trace_id = (
+            payload.get("trace_id")
+            or payload.get("correlation_id")
+            or meta.get("trace_id")
+            or meta.get("correlation_id")
+            or job_id
+        )
+    trace_id = str(trace_id or job_id).strip() or job_id
+    meta = dict(meta or {})
+    meta["trace_id"] = str(meta.get("trace_id") or trace_id).strip() or trace_id
 
     program_stem, lang_from_job_id, _ = _parse_job_id(job_id)
     payload_stem = None
@@ -322,6 +379,7 @@ def _extract_job_context(job_id: str, payload: Optional[dict]) -> dict:
 
     context = {
         "meta": meta,
+        "trace_id": trace_id,
         "program_stem": program_stem,
         "target_language": target_language,
         "program_profile": program_profile,
@@ -483,11 +541,69 @@ def _sync_approved_blob(
     blob_name: str,
     job_id: str,
 ) -> Optional[Path]:
-    local_path = config.TRANSLATED_DONE_DIR / f"{job_id}_APPROVED.json"
+    def _write_payload_atomic(payload: object, path: Path) -> None:
+        tmp_path = tmp_dir / f"{job_id}_APPROVED.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, ensure_ascii=False)
+        os.replace(tmp_path, path)
+
+    def _normalize_for_review(raw_payload: object) -> object:
+        # Cloud-approved payloads must be normalized before finalization so line breaks,
+        # CPS fixes, and timing cleanup are applied consistently.
+        if isinstance(raw_payload, dict):
+            raw_segments = raw_payload.get("segments")
+        elif isinstance(raw_payload, list):
+            raw_segments = raw_payload
+        else:
+            return raw_payload
+
+        if not isinstance(raw_segments, list) or not raw_segments:
+            return raw_payload
+
+        from workers import finalizer
+
+        job = omega_db.get_job_via_track(job_id) or {}
+        target_language = str(job.get("target_language") or "is").strip().lower() or "is"
+        normalized_segments = finalizer.normalize_segments_for_review(
+            raw_segments,
+            target_language=target_language,
+        )
+
+        cleaned_segments = [
+            {
+                "start": seg.get("start"),
+                "end": seg.get("end"),
+                "text": seg.get("text"),
+                "speaker": seg.get("speaker"),
+            }
+            for seg in normalized_segments
+        ]
+
+        if isinstance(raw_payload, dict):
+            normalized_payload = dict(raw_payload)
+        else:
+            normalized_payload = {}
+        normalized_payload["segments"] = cleaned_segments
+        normalized_payload["normalized_for_review"] = True
+        normalized_payload["normalized_at"] = datetime.now().isoformat()
+        return normalized_payload
+
+    tmp_dir = config.TRANSLATED_DONE_DIR
+    local_path = tmp_dir / f"{job_id}_APPROVED.json"
     sync_state = omega_db.get_sync_state(job_id, "approved_json")
     local_exists = local_path.exists()
     artifact_matches = sync_state and sync_state.get("artifact_path") == blob_name
     if sync_state and sync_state.get("state") == "SYNCED" and local_exists and artifact_matches:
+        try:
+            with job_artifact_lock(job_id, timeout_seconds=60.0):
+                with open(local_path, "r", encoding="utf-8") as handle:
+                    existing_payload = json.load(handle)
+                normalized_payload = _normalize_for_review(existing_payload)
+                if normalized_payload != existing_payload:
+                    _write_payload_atomic(normalized_payload, local_path)
+                    LOG.info("Normalized existing approved payload for %s", job_id)
+        except Exception as e:
+            LOG.warning("Failed to normalize existing approved payload for %s: %s", job_id, e)
         return local_path
 
     gcs_path = blob_name
@@ -523,19 +639,16 @@ def _sync_approved_blob(
     omega_db.update_sync_state(job_id, "approved_json", "DOWNLOADING", artifact_path=gcs_path)
     try:
         payload = download_json(storage_client, bucket=bucket, blob_name=blob_name)
+        payload = _normalize_for_review(payload)
     except Exception as e:
         LOG.error("Failed to download approved.json for %s: %s", job_id, e)
         omega_db.update_sync_state(job_id, "approved_json", "PENDING", artifact_path=gcs_path, error_message=str(e))
         raise
 
-    tmp_dir = config.TRANSLATED_DONE_DIR
-    tmp_path = tmp_dir / f"{job_id}_APPROVED.tmp"
-    with open(tmp_path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, ensure_ascii=False)
-    os.replace(tmp_path, local_path)
-
-    omega_db.update_sync_state(job_id, "approved_json", "FILE_SAVED", local_path=str(local_path), artifact_path=gcs_path)
-    omega_db.update_sync_state(job_id, "approved_json", "SYNCED", local_path=str(local_path), artifact_path=gcs_path)
+    with job_artifact_lock(job_id, timeout_seconds=60.0):
+        _write_payload_atomic(payload, local_path)
+        omega_db.update_sync_state(job_id, "approved_json", "FILE_SAVED", local_path=str(local_path), artifact_path=gcs_path)
+        omega_db.update_sync_state(job_id, "approved_json", "SYNCED", local_path=str(local_path), artifact_path=gcs_path)
     return local_path
 
 
@@ -593,6 +706,7 @@ def _sync_job(
     payload = _load_job_payload(storage_client, bucket, prefix, job_id)
     context = _extract_job_context(job_id, payload)
     meta = context.get("meta") or {}
+    trace_id = str(context.get("trace_id") or job_id).strip() or job_id
 
     station_id = str(meta.get("station_id") or (payload.get("station_id") if payload else None) or "").strip().lower()
     if config.OMEGA_STATION_ID:
@@ -658,16 +772,38 @@ def _sync_job(
             stage = progress_data.get("stage")
             status = progress_data.get("status")
             progress_val = progress_data.get("progress")
+            progress_meta = progress_data.get("meta") if isinstance(progress_data.get("meta"), dict) else {}
+            progress_trace = str(
+                progress_data.get("trace_id")
+                or progress_meta.get("trace_id")
+                or trace_id
+                or job_id
+            ).strip() or job_id
             
             # Map cloud stages to local DB stages if possible, or just update status/progress
             # This allows the UI to show "CLOUD_TRANSLATING: Loading skeleton (40%)"
             if stage and status:
+                cloud_progress = {
+                    "stage": stage,
+                    "status": status,
+                    "progress": progress_val,
+                    "updated_at": progress_data.get("updated_at"),
+                    "meta": progress_meta,
+                }
                 omega_db.update_track(
                     track["id"], 
                     status=f"{stage}: {status}", 
-                    progress=progress_val
+                    progress=progress_val,
+                    meta={"cloud_progress": cloud_progress, "trace_id": progress_trace},
                 )
-                LOG.info(f"Updated progress for {job_id}: {stage} - {status} ({progress_val}%)")
+                LOG.info(
+                    "Updated progress for %s [trace_id=%s]: %s - %s (%s%%)",
+                    job_id,
+                    progress_trace,
+                    stage,
+                    status,
+                    progress_val,
+                )
         return True
 
     approved_path = _sync_approved_blob(
@@ -679,6 +815,7 @@ def _sync_job(
 
     meta_updates = _clean_meta({
         "cloud_job_id": job_id,
+        "trace_id": trace_id,
         "cloud_bucket": bucket,
         "cloud_prefix": prefix,
         "target_language": target_language,
@@ -734,11 +871,19 @@ def sync_once(storage_client: storage.Client) -> int:
                 )
                 processed += 1
             except Exception as exc:
-                LOG.error("Sync failed for %s: %s", job_id, exc)
+                LOG.error("Sync failed for %s during _sync_job: %s", job_id, exc)
+                if _is_db_error(exc):
+                    raise
                 try:
                     omega_db.update_sync_state(job_id, "approved_json", "PENDING", error_message=str(exc))
-                except Exception:
-                    pass
+                except Exception as state_exc:
+                    LOG.warning(
+                        "Failed to reset sync state for %s after sync error: %s",
+                        job_id,
+                        state_exc,
+                    )
+                    if _is_db_error(state_exc):
+                        raise
 
     _apply_deadman(storage_client)
     return processed
@@ -765,15 +910,46 @@ def main() -> None:
         return
 
     poll_seconds = float(getattr(config, "OMEGA_CLOUD_SYNC_POLL_SECONDS", 60.0))
+    db_failure_streak = 0
+    circuit_open_until: Optional[float] = None
 
     while True:
         system_health.update_heartbeat("cloud_sync_service")
+        now = time.time()
+        if circuit_open_until and now < circuit_open_until:
+            remaining = max(0.0, circuit_open_until - now)
+            LOG.warning(
+                "Cloud sync DB circuit breaker open (%.0fs remaining); skipping this cycle",
+                remaining,
+            )
+            sleep_seconds = max(5.0, min(max(5.0, poll_seconds), remaining or poll_seconds))
+            time.sleep(sleep_seconds)
+            continue
+
         try:
             synced = sync_once(storage_client)
+            db_failure_streak = 0
             if synced:
                 LOG.info("Synced %d cloud job(s)", synced)
         except Exception as exc:
-            LOG.error("Cloud sync loop error: %s", exc)
+            if _is_db_error(exc):
+                db_failure_streak += 1
+                LOG.error(
+                    "Cloud sync DB error (%d/%d): %s",
+                    db_failure_streak,
+                    CLOUD_SYNC_DB_FAILURE_THRESHOLD,
+                    exc,
+                )
+                if db_failure_streak >= CLOUD_SYNC_DB_FAILURE_THRESHOLD:
+                    circuit_open_until = time.time() + CLOUD_SYNC_DB_COOLDOWN_SECONDS
+                    db_failure_streak = 0
+                    LOG.error(
+                        "Cloud sync DB circuit breaker opened for %.0fs",
+                        CLOUD_SYNC_DB_COOLDOWN_SECONDS,
+                    )
+            else:
+                db_failure_streak = 0
+                LOG.error("Cloud sync loop error: %s", exc)
         time.sleep(max(5.0, poll_seconds))
 
 

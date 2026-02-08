@@ -184,26 +184,12 @@ def publish(video_path: Path, srt_path: Path, subtitle_style: str = "Classic",
             delivery_profile: str = None):
     """
     Burns subtitles into video using the specified style and delivery profile.
-    ...
-    """
-    # ... (existing content logic is unchanged until we hit subprocess calls) ...
-    # Wait, I cannot replace the whole function easily.
-    # I should insert the helper BEFORE publish, and modify calls inside publish.
-    pass 
-
-# I will restart this Replace to be granular.
-# First insert the helper.
-
-    """
-    Burns subtitles into video using the specified style and delivery profile.
-    
     Args:
         video_path: Path to source video
-        srt_path: Path to subtitle SRT file  
+        srt_path: Path to subtitle SRT file
         subtitle_style: "Classic" (RuvBox), "Modern" (Default/Shadow), or "Apple"
-        delivery_profile: Encoding profile key from config.DELIVERY_PROFILES
-                         (e.g., "broadcast_hevc", "broadcast_h264", "web", "archive", "universal")
-                         If None, uses config.DEFAULT_DELIVERY_PROFILE
+        delivery_profile: Encoding profile key from config.DELIVERY_PROFILES.
+            If None, uses config.DEFAULT_DELIVERY_PROFILE.
     """
     if not video_path.exists():
         raise FileNotFoundError(f"Video not found: {video_path}")
@@ -214,9 +200,8 @@ def publish(video_path: Path, srt_path: Path, subtitle_style: str = "Classic",
     stem = srt_path.stem.replace("_SUBBED", "")
     output_dir = config.DELIVERY_DIR / "VIDEO"
     output_dir.mkdir(parents=True, exist_ok=True)
-    
     output_path = output_dir / f"{stem}_SUBBED.mp4"
-    
+
     # Get delivery profile
     profile_key = delivery_profile or config.DEFAULT_DELIVERY_PROFILE
     profile = config.DELIVERY_PROFILES.get(profile_key)
@@ -224,23 +209,21 @@ def publish(video_path: Path, srt_path: Path, subtitle_style: str = "Classic",
         logger.warning(f"Unknown delivery profile '{profile_key}', falling back to broadcast_hevc")
         profile = config.DELIVERY_PROFILES["broadcast_hevc"]
         profile_key = "broadcast_hevc"
-    
     logger.info(f"🔥 Burning Subtitles: {stem} (Style: {subtitle_style}, Profile: {profile['name']})")
-    
+
     # Map User Style to ASS Style Name
     style_map = config.BURN_METHOD_MAP
     ass_style_name = style_map.get(subtitle_style, "Apple")
-    
+
     if ass_style_name == "Apple":
         logger.info("🍎 Using Apple Style (Overlay Engine)")
-        
+
         # 1. Convert SRT to JSON for the Overlay Engine
         temp_json_path = config.VAULT_DATA / f"{stem}_OVERLAY_INPUT.json"
         parse_srt_to_overlay_json(srt_path, temp_json_path)
-        
+
         # 2. Render Overlay (ProRes 4444 MOV)
         overlay_mov_path = config.VAULT_DATA / f"{stem}_OVERLAY.mov"
-        
         render_overlay(
             video_path=str(video_path),
             subs_json_path=str(temp_json_path),
@@ -248,7 +231,7 @@ def publish(video_path: Path, srt_path: Path, subtitle_style: str = "Classic",
             profile_name="AppleTV_IS",
             stem=stem
         )
-        
+
         # 3. Composite Overlay onto Video (uses delivery profile encoder)
         logger.info("   Compositing Overlay...")
         cmd = [
@@ -258,34 +241,31 @@ def publish(video_path: Path, srt_path: Path, subtitle_style: str = "Classic",
             "-filter_complex", "[0:v][1:v]overlay=0:0,format=yuv420p",
             "-map", "0:a",
         ]
-        # Add encoder args from profile
         cmd.extend(build_encoder_args(profile))
-        # Add color and output settings
         cmd.extend([
             "-color_primaries", "1",
-            "-color_trc", "1", 
+            "-color_trc", "1",
             "-colorspace", "1",
             "-pix_fmt", "yuv420p",
             "-movflags", "+faststart",
             "-c:a", "copy",
             str(output_path)
         ])
-        
     else:
         # Standard ASS Burn-in (Classic / Modern)
-        
+
         # 1. Generate ASS
         ass_path = config.VAULT_DATA / f"{stem}.ass"
         generate_ass_from_srt(srt_path, ass_path, style_name=ass_style_name)
-        
+
         # ESCAPE PATH FOR FFMPEG FILTER
         ass_path_str = str(ass_path)
-        ass_path_escaped = ass_path_str.replace("\\", "/").replace(":", "\\:").replace("'", "'\\\\''"  )
-        
+        ass_path_escaped = ass_path_str.replace("\\", "/").replace(":", "\\:").replace("'", "'\\\\''")
+
         # Build filter chain: ass with fontsdir, then format conversion
         vf_filter = f"ass='{ass_path_escaped}':fontsdir='/System/Library/Fonts/',format=yuv420p"
-        
-        # STABILITY OVERRIDE: 
+
+        # STABILITY OVERRIDE:
         # The 'ass' filter is notoriously unstable with hardware acceleration or high-speed hardware encoders (Code 254).
         # For Classic/Modern looks, we force use of the 'universal' (libx264) profile or at least a software encoder.
         if "videotoolbox" in profile.get("encoder", "") or subtitle_style in ["Classic", "Modern"]:
@@ -302,9 +282,7 @@ def publish(video_path: Path, srt_path: Path, subtitle_style: str = "Classic",
             "-map", "0:v", "-map", "0:a",
             "-vf", vf_filter,
         ]
-        # Add encoder args
         cmd.extend(encoder_args)
-        # Add color and output settings
         cmd.extend([
             "-color_primaries", "1",
             "-color_trc", "1",
@@ -314,39 +292,35 @@ def publish(video_path: Path, srt_path: Path, subtitle_style: str = "Classic",
             "-c:a", "copy",
             str(output_path)
         ])
-    
+
     logger.info(f"   Running FFmpeg ({profile['name']}): {' '.join(cmd)}")
-    
+
     # --- RENDER TO LOCAL TEMP FIRST ---
     # To prevent external drive failures (USB IO saturation) during high-speed encoding,
     # we render to the internal drive first, then move the result.
     temp_dir = config.BASE_DIR / "temp_render"
     temp_dir.mkdir(parents=True, exist_ok=True)
     temp_output_path = temp_dir / output_path.name
-    
+
     # Replace output path in command
-    # cmd[-1] is the output path
     cmd[-1] = str(temp_output_path)
-    
+
     try:
         # Prevent SIGTTOU suspension by explicitly detaching stdin
         _run_ffmpeg_with_progress(cmd, stem, temp_output_path, video_path)
-        
+
         # Move to final destination
         logger.info(f"   🚚 Moving local render to destination: {output_path}")
         if output_path.exists():
             output_path.unlink()
         shutil.move(str(temp_output_path), str(output_path))
-        
+
         return output_path
-    
     except Exception as e:
         # Cleanup temp
         if temp_output_path.exists():
             temp_output_path.unlink()
         raise e
-    
-    return output_path
 
 def parse_srt_to_overlay_json(srt_path, json_path):
     """

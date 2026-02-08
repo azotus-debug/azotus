@@ -11,6 +11,7 @@ fi
 LOG_FILE="logs/manager.log"
 LOCK_FILE="/tmp/omega_manager.lock"
 WATCHDOG_PID_FILE="/tmp/omega_watchdog.pid"
+WATCHDOG_SUP_PID_FILE="/tmp/omega_watchdog_supervisor.pid"
 CAFFEINATE_PID_FILE="/tmp/omega_caffeinate.pid"
 CLOUD_SYNC_PID_FILE="/tmp/omega_cloud_sync.pid"
 FRONTEND_PID_FILE="/tmp/omega_frontend.pid"
@@ -53,6 +54,8 @@ export OMEGA_CLOUD_MUSIC_DETECT="${OMEGA_CLOUD_MUSIC_DETECT:-1}"
 export OMEGA_CLOUD_SYNC_ENABLED="${OMEGA_CLOUD_SYNC_ENABLED:-1}"
 export OMEGA_CLOUD_SYNC_POLL_SECONDS="${OMEGA_CLOUD_SYNC_POLL_SECONDS:-60}"
 export OMEGA_CLOUD_SYNC_BATCH_LIMIT="${OMEGA_CLOUD_SYNC_BATCH_LIMIT:-50}"
+export OMEGA_CLOUD_SYNC_DB_FAILURE_THRESHOLD="${OMEGA_CLOUD_SYNC_DB_FAILURE_THRESHOLD:-3}"
+export OMEGA_CLOUD_SYNC_DB_COOLDOWN_SECONDS="${OMEGA_CLOUD_SYNC_DB_COOLDOWN_SECONDS:-300}"
 export DB_TYPE="${DB_TYPE:-postgres}"
 # Remote review portal (Cloud Run URL) + email settings
 export OMEGA_REVIEW_PORTAL_URL="${OMEGA_REVIEW_PORTAL_URL:-}"
@@ -126,6 +129,32 @@ echo "   Backend API: http://127.0.0.1:8080"
 # 2.1 Start Frontend (Next.js)
 FRONTEND_ENABLED=$(echo "${OMEGA_FRONTEND_ENABLED}" | tr '[:upper:]' '[:lower:]')
 if [ "$FRONTEND_ENABLED" = "1" ] || [ "$FRONTEND_ENABLED" = "true" ] || [ "$FRONTEND_ENABLED" = "yes" ] || [ "$FRONTEND_ENABLED" = "on" ]; then
+  # Clean up orphaned frontend processes from previous runs to avoid multi-port drift.
+  FRONTEND_PATH_PATTERN="$BASE_DIR/omega-frontend/node_modules/.bin/next"
+  ORPHAN_FRONTEND_PIDS=$(ps aux | grep "$FRONTEND_PATH_PATTERN" | awk '{print $2}')
+  if [ -n "$ORPHAN_FRONTEND_PIDS" ]; then
+    echo "🧹 Cleaning orphaned Frontend PIDs: $ORPHAN_FRONTEND_PIDS"
+    kill -9 $ORPHAN_FRONTEND_PIDS 2>/dev/null
+    rm -f "$FRONTEND_PID_FILE"
+    sleep 1
+  fi
+  NEXT_SERVER_PIDS=$(ps aux | awk '/[n]ext-server/{print $2}')
+  ORPHAN_NEXT_SERVER_PIDS=""
+  for pid in $NEXT_SERVER_PIDS; do
+    cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)
+    case "$cwd" in
+      */Azotus/omega-frontend*)
+        ORPHAN_NEXT_SERVER_PIDS="$ORPHAN_NEXT_SERVER_PIDS $pid"
+        ;;
+    esac
+  done
+  if [ -n "$ORPHAN_NEXT_SERVER_PIDS" ]; then
+    echo "🧹 Cleaning orphaned next-server PIDs:$ORPHAN_NEXT_SERVER_PIDS"
+    kill -9 $ORPHAN_NEXT_SERVER_PIDS 2>/dev/null
+    rm -f "$FRONTEND_PID_FILE"
+    sleep 1
+  fi
+
   if [ -f "$FRONTEND_PID_FILE" ]; then
     OLD_FRONTEND_PID=$(cat "$FRONTEND_PID_FILE" 2>/dev/null)
     if [ -n "$OLD_FRONTEND_PID" ] && kill -0 "$OLD_FRONTEND_PID" 2>/dev/null; then
@@ -307,19 +336,19 @@ if command -v caffeinate >/dev/null 2>&1; then
   echo "☕ Caffeinate active (PID: $(cat "$CAFFEINATE_PID_FILE"))"
 fi
 
-# 3.6 Start watchdog (auto-restart manager/dashboard if they die)
-if [ -f "$WATCHDOG_PID_FILE" ]; then
-  OLD_PID=$(cat "$WATCHDOG_PID_FILE" 2>/dev/null)
-  if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
-    echo "🐶 Watchdog already running (PID: $OLD_PID)"
+# 3.6 Start watchdog supervisor (keeps watchdog alive)
+if [ -f "$WATCHDOG_SUP_PID_FILE" ]; then
+  OLD_SUP_PID=$(cat "$WATCHDOG_SUP_PID_FILE" 2>/dev/null)
+  if [ -n "$OLD_SUP_PID" ] && kill -0 "$OLD_SUP_PID" 2>/dev/null; then
+    echo "🐶 Watchdog supervisor already running (PID: $OLD_SUP_PID)"
   else
-    rm -f "$WATCHDOG_PID_FILE"
+    rm -f "$WATCHDOG_SUP_PID_FILE"
   fi
 fi
-if [ ! -f "$WATCHDOG_PID_FILE" ]; then
-  nohup "$OMEGA_PYTHON" process_watchdog.py > logs/watchdog.log 2>&1 &
-  echo $! > "$WATCHDOG_PID_FILE"
-  echo "🐶 Watchdog started (PID: $(cat "$WATCHDOG_PID_FILE"))"
+if [ ! -f "$WATCHDOG_SUP_PID_FILE" ]; then
+  nohup "$OMEGA_PYTHON" watchdog_supervisor.py > logs/watchdog_supervisor.log 2>&1 &
+  echo $! > "$WATCHDOG_SUP_PID_FILE"
+  echo "🐶 Watchdog supervisor started (PID: $(cat "$WATCHDOG_SUP_PID_FILE"))"
 fi
 
 # 4. Tail the log file so user sees immediate feedback

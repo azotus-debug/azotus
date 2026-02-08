@@ -1,5 +1,7 @@
 import os
 import json
+import time
+import functools
 import config
 import logging
 logger = logging.getLogger("OmegaDB")
@@ -9,6 +11,57 @@ from datetime import datetime, timedelta
 
 # CONFIG
 _SCHEMA_READY = False
+
+# --- DB Resilience: retry decorator for transient errors ---
+_TRANSIENT_ERRORS = (
+    "connection",
+    "timeout",
+    "operational",
+    "closed",
+    "reset by peer",
+    "broken pipe",
+    "ssl",
+    "eof",
+    "unavailable",
+    "too many connections",
+)
+
+def _is_transient_db_error(exc: Exception) -> bool:
+    """Check if an exception looks like a transient DB/network error."""
+    msg = str(exc).lower()
+    return any(keyword in msg for keyword in _TRANSIENT_ERRORS)
+
+def db_retry(max_retries: int = 3, base_delay: float = 0.5):
+    """Decorator that retries DB operations on transient errors with exponential backoff."""
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exc = None
+            for attempt in range(max_retries + 1):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as exc:
+                    last_exc = exc
+                    if attempt < max_retries and _is_transient_db_error(exc):
+                        delay = base_delay * (2 ** attempt)
+                        logger.warning(
+                            "DB transient error in %s (attempt %d/%d, retry in %.1fs): %s",
+                            func.__name__, attempt + 1, max_retries + 1, delay, exc,
+                        )
+                        time.sleep(delay)
+                        # Force pool to discard the bad connection on next use
+                        global _PG_POOL
+                        if _PG_POOL:
+                            try:
+                                _PG_POOL.dispose()
+                            except Exception:
+                                pass
+                            _PG_POOL = None
+                    else:
+                        raise
+            raise last_exc
+        return wrapper
+    return decorator
 
 def _fetchone_dict(cursor):
     """Fetch one row as a dictionary."""
@@ -123,6 +176,7 @@ def _get_pg_connection():
         max_overflow=5,
         pool_timeout=60,
         pool_recycle=1800,
+        pool_pre_ping=True,
     )
     
     return _PG_POOL.raw_connection()
@@ -665,6 +719,7 @@ def _job_dict_from_track_row(row):
     }
 
 
+@db_retry()
 def get_job_via_track(file_stem):
     """MIGRATION HELPER: Fetch a job via tracks/programs."""
     conn = _connect()
@@ -707,6 +762,7 @@ def get_job_via_track(file_stem):
     return _job_dict_from_track_row(row)
 
 
+@db_retry()
 def get_all_jobs_via_tracks(stages: list = None, limit: int = 100) -> list:
     """MIGRATION HELPER: Fetch jobs via tracks/programs.
     
@@ -764,6 +820,7 @@ def get_all_jobs_via_tracks(stages: list = None, limit: int = 100) -> list:
     return [_job_dict_from_track_row(row) for row in rows]
 
 
+@db_retry()
 def update_job_via_track(
     file_stem,
     stage=None,
@@ -1602,6 +1659,7 @@ def update_track(track_id: str, **kwargs) -> bool:
     return success
 
 
+@db_retry()
 def get_track_by_job(job_id: str) -> dict:
     """Find track by linked job ID."""
     conn = _connect()
@@ -2242,6 +2300,7 @@ def get_all_stations() -> list:
     return results
 
 
+@db_retry()
 def cleanup_dead_stations(timeout_minutes: int = 5) -> int:
     """
     Reset jobs claimed by stations that haven't sent a heartbeat in `timeout_minutes`.
@@ -2940,6 +2999,7 @@ def get_next_pending_chapter(book_id: str, for_step: int = 1) -> dict:
 # CLOUD SYNC HELPERS (Phase 1)
 # =========================================================================
 
+@db_retry()
 def get_sync_state(artifact_id: str, artifact_type: str):
     """Get the sync state for a specific artifact."""
     conn = _connect()
@@ -2954,6 +3014,7 @@ def get_sync_state(artifact_id: str, artifact_type: str):
     finally:
         conn.close()
 
+@db_retry()
 def create_sync_state(artifact_id: str, artifact_type: str, artifact_path: str, local_path: str = None):
     """Create initial sync state record."""
     conn = _connect()
@@ -2969,6 +3030,7 @@ def create_sync_state(artifact_id: str, artifact_type: str, artifact_path: str, 
         conn.close()
 
 
+@db_retry()
 def update_sync_state(artifact_id: str, artifact_type: str, state: str,
                       local_path: str = None, error_message: str = None,
                       artifact_path: str = None):
@@ -3001,6 +3063,7 @@ def update_sync_state(artifact_id: str, artifact_type: str, state: str,
         conn.close()
 
 
+@db_retry()
 def get_pending_syncs(artifact_type: str = None) -> list:
     """Get all sync operations that need processing."""
     conn = _connect()
@@ -3307,6 +3370,7 @@ def create_dropzone_recipe(
         conn.close()
     return recipe_id
 
+@db_retry()
 def get_dropzone_recipe(recipe_id: str = None, folder_name: str = None) -> dict:
     """Get a dropzone recipe by ID or folder name. Returns None if not found."""
     conn = _connect()
@@ -3331,6 +3395,7 @@ def get_dropzone_recipe(recipe_id: str = None, folder_name: str = None) -> dict:
     finally:
         conn.close()
 
+@db_retry()
 def list_dropzone_recipes() -> list:
     """List all dropzone recipes."""
     conn = _connect()
@@ -3350,6 +3415,7 @@ def list_dropzone_recipes() -> list:
     finally:
         conn.close()
 
+@db_retry()
 def update_dropzone_recipe(recipe_id: str, **kwargs) -> bool:
     """Update a dropzone recipe. Returns True if updated."""
     allowed = {'name', 'folder_name', 'ministry_id', 'languages', 'delivery_id'}
@@ -3378,6 +3444,7 @@ def update_dropzone_recipe(recipe_id: str, **kwargs) -> bool:
         conn.close()
 
 
+@db_retry()
 def delete_dropzone_recipe(recipe_id: str) -> bool:
     """Delete a dropzone recipe. Returns True if deleted."""
     conn = _connect()
@@ -3388,6 +3455,104 @@ def delete_dropzone_recipe(recipe_id: str) -> bool:
         return c.rowcount > 0
     finally:
         conn.close()
+
+
+# =============================================================================
+# APP SETTINGS (key-value via system_state table)
+# =============================================================================
+
+# Default settings — used when no override exists in the DB.
+_DEFAULT_APP_SETTINGS = {
+    "default_target_language": "is",
+    "default_subtitle_style": "Classic",
+    "auto_burn_on_finalize": True,
+    "cloud_translation_enabled": True,
+    "cloud_region": "us-central1",
+    "cloud_polish_mode": "review",
+    "notification_email": "",
+    "notification_on_complete": True,
+    "notification_on_failure": True,
+    "default_voice": "alloy",
+    "default_delivery_profile": "broadcast_hevc",
+}
+
+_SETTINGS_PREFIX = "app_setting:"
+
+
+def get_app_settings() -> dict:
+    """
+    Return the full app-settings dict.
+
+    Values stored in system_state (keyed as "app_setting:<name>") override the
+    built-in defaults.  Boolean and numeric values are coerced back from their
+    text representation.
+    """
+    settings = dict(_DEFAULT_APP_SETTINGS)
+    conn = _connect()
+    try:
+        c = conn.cursor()
+        c.execute(
+            "SELECT key, value FROM system_state WHERE key LIKE ?",
+            (f"{_SETTINGS_PREFIX}%",),
+        )
+        for row in c.fetchall():
+            name = row["key"][len(_SETTINGS_PREFIX):]
+            raw = row["value"]
+            if name in settings:
+                settings[name] = _coerce_setting(name, raw)
+            else:
+                # Unknown key — store as-is string
+                settings[name] = raw
+    finally:
+        conn.close()
+    return settings
+
+
+def update_app_settings(partial: dict) -> dict:
+    """
+    Persist a partial update of app settings and return the merged result.
+
+    Only keys present in *partial* are written; the rest remain unchanged.
+    """
+    conn = _connect()
+    try:
+        c = conn.cursor()
+        for name, value in partial.items():
+            db_key = f"{_SETTINGS_PREFIX}{name}"
+            # Serialize booleans as "1"/"0"
+            if isinstance(value, bool):
+                db_value = "1" if value else "0"
+            else:
+                db_value = str(value)
+            c.execute(
+                """
+                INSERT INTO system_state (key, value) VALUES (?, ?)
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+                """,
+                (db_key, db_value),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return get_app_settings()
+
+
+def _coerce_setting(name: str, raw: str):
+    """Coerce a raw DB string back to the Python type of its default."""
+    default = _DEFAULT_APP_SETTINGS.get(name)
+    if isinstance(default, bool):
+        return raw.lower() in {"1", "true", "yes", "on"}
+    if isinstance(default, int):
+        try:
+            return int(raw)
+        except ValueError:
+            return default
+    if isinstance(default, float):
+        try:
+            return float(raw)
+        except ValueError:
+            return default
+    return raw
 
 
 # =============================================================================
@@ -3405,5 +3570,9 @@ def _ensure_schema():
         logger.warning(f"PostgreSQL schema init: {e}")
 
 
-# Run schema initialization when module is imported
-_ensure_schema()
+# Optional eager initialization. Keep disabled by default so utility scripts
+# that import DB-adjacent modules do not open Cloud SQL connections at import
+# time unless explicitly requested.
+_AUTO_INIT_SCHEMA = str(os.getenv("OMEGA_DB_AUTO_INIT_SCHEMA", "0")).strip().lower() in {"1", "true", "yes", "on"}
+if _AUTO_INIT_SCHEMA:
+    _ensure_schema()

@@ -70,7 +70,6 @@ class JobStage(str, enum.Enum):
             "CLOUD_DETECTING_MUSIC": cls.PROCESSING,
             "CLOUD_REVIEWING": cls.PROCESSING,
             "CLOUD_DONE": cls.PROCESSING,
-            "BURNING": cls.PROCESSING,
 
             # Review stages
             "REVIEWING": cls.REVIEWING,
@@ -80,6 +79,7 @@ class JobStage(str, enum.Enum):
             # Finalize stages
             "FINALIZING": cls.FINALIZING,
             "FINALIZED": cls.FINALIZING,
+            "BURNING": cls.FINALIZING,
 
             # Completed
             "COMPLETED": cls.DELIVERED,
