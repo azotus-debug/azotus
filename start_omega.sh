@@ -1,360 +1,282 @@
 #!/bin/bash
+set -euo pipefail
 
-# Omega Manager Launcher
-# Ensures the process starts in the background without being suspended by SIGTTOU.
+BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$BASE_DIR"
 
-# Ensure clean slate
-if [ "${OMEGA_SKIP_STOP:-0}" != "1" ]; then
-  ./stop_all.sh
-fi
-
-LOG_FILE="logs/manager.log"
-LOCK_FILE="/tmp/omega_manager.lock"
-WATCHDOG_PID_FILE="/tmp/omega_watchdog.pid"
-WATCHDOG_SUP_PID_FILE="/tmp/omega_watchdog_supervisor.pid"
-CAFFEINATE_PID_FILE="/tmp/omega_caffeinate.pid"
-CLOUD_SYNC_PID_FILE="/tmp/omega_cloud_sync.pid"
-FRONTEND_PID_FILE="/tmp/omega_frontend.pid"
+LOG_DIR="$BASE_DIR/logs"
+mkdir -p "$LOG_DIR"
 
 echo "🚀 Starting OmegaTV System..."
 
-# Ensure logs folder exists
-mkdir -p logs
-
-# Rotate logs if they're too large (prevents disk filling up)
 if [ -x "./scripts/rotate_logs.sh" ]; then
-  ./scripts/rotate_logs.sh > /dev/null 2>&1
+  ./scripts/rotate_logs.sh >/dev/null 2>&1 || true
 fi
 
-# Optional: load secrets from a local file (kept out of git).
+# Optional local secrets/config.
 if [ -f ".omega_secrets" ]; then
   # shellcheck disable=SC1091
   source ".omega_secrets"
 fi
-
-# Load .env file (for OMEGA_TRANSCRIBER and other settings)
 if [ -f ".env" ]; then
-  set -a  # automatically export all variables
+  set -a
+  # shellcheck disable=SC1091
   source ".env"
   set +a
 fi
 
-# Cloud Run Job defaults (override in shell if needed)
+# Canonical runtime defaults (single system).
+export DB_TYPE="${DB_TYPE:-postgres}"
+export OMEGA_CLOUD_PIPELINE="${OMEGA_CLOUD_PIPELINE:-1}"
+export OMEGA_CLOUD_SYNC_ENABLED="${OMEGA_CLOUD_SYNC_ENABLED:-1}"
 export OMEGA_CLOUD_RUN_JOB="${OMEGA_CLOUD_RUN_JOB:-omega-cloud-worker}"
 export OMEGA_CLOUD_RUN_REGION="${OMEGA_CLOUD_RUN_REGION:-us-central1}"
 export OMEGA_CLOUD_PROJECT="${OMEGA_CLOUD_PROJECT:-sermon-translator-system}"
-# Cloud-first translation/editor pipeline (disable by setting OMEGA_CLOUD_PIPELINE=0)
-export OMEGA_CLOUD_PIPELINE="${OMEGA_CLOUD_PIPELINE:-1}"
 export OMEGA_JOBS_BUCKET="${OMEGA_JOBS_BUCKET:-omega-jobs-subtitle-project}"
 export OMEGA_JOBS_PREFIX="${OMEGA_JOBS_PREFIX:-jobs}"
-# Enable the 3rd-pass polish step for all jobs by default ("review" or "all").
-# Detect and suppress choir/worship lyrics before translation.
 export OMEGA_CLOUD_MUSIC_DETECT="${OMEGA_CLOUD_MUSIC_DETECT:-1}"
-# Cloud sync daemon (poll GCS for completed jobs)
-export OMEGA_CLOUD_SYNC_ENABLED="${OMEGA_CLOUD_SYNC_ENABLED:-1}"
-export OMEGA_CLOUD_SYNC_POLL_SECONDS="${OMEGA_CLOUD_SYNC_POLL_SECONDS:-60}"
-export OMEGA_CLOUD_SYNC_BATCH_LIMIT="${OMEGA_CLOUD_SYNC_BATCH_LIMIT:-50}"
-export OMEGA_CLOUD_SYNC_DB_FAILURE_THRESHOLD="${OMEGA_CLOUD_SYNC_DB_FAILURE_THRESHOLD:-3}"
-export OMEGA_CLOUD_SYNC_DB_COOLDOWN_SECONDS="${OMEGA_CLOUD_SYNC_DB_COOLDOWN_SECONDS:-300}"
-export DB_TYPE="${DB_TYPE:-postgres}"
-# Remote review portal (Cloud Run URL) + email settings
-export OMEGA_REVIEW_PORTAL_URL="${OMEGA_REVIEW_PORTAL_URL:-}"
-export OMEGA_REVIEWER_EMAIL="${OMEGA_REVIEWER_EMAIL:-hawk1982@me.com}"
-export OMEGA_SMTP_HOST="${OMEGA_SMTP_HOST:-smtp.gmail.com}"
-export OMEGA_SMTP_PORT="${OMEGA_SMTP_PORT:-587}"
-export OMEGA_SMTP_USER="${OMEGA_SMTP_USER:-haukur1982@gmail.com}"
-export OMEGA_SMTP_PASS="${OMEGA_SMTP_PASS:-}"
-export OMEGA_SMTP_FROM="${OMEGA_SMTP_FROM:-haukur1982@gmail.com}"
-# Frontend (Next.js)
+
+export OMEGA_FASTAPI_HOST="${OMEGA_FASTAPI_HOST:-127.0.0.1}"
+export OMEGA_FASTAPI_PORT="${OMEGA_FASTAPI_PORT:-8001}"
+export OMEGA_FRONTEND_PORT="${OMEGA_FRONTEND_PORT:-3000}"
 export OMEGA_FRONTEND_ENABLED="${OMEGA_FRONTEND_ENABLED:-1}"
-export OMEGA_FRONTEND_URL="${OMEGA_FRONTEND_URL:-http://127.0.0.1:3000}"
-# Allow PyTorch to load trusted model checkpoints when needed.
-export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD="${TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD:-1}"
+export OMEGA_CORS_ORIGINS="${OMEGA_CORS_ORIGINS:-http://127.0.0.1:${OMEGA_FRONTEND_PORT},http://localhost:${OMEGA_FRONTEND_PORT}}"
 
-# --- TRANSCRIPTION (ElevenLabs Scribe v2) ---
-# API key loaded from .omega_secrets or .env
-export ELEVENLABS_API_KEY="${ELEVENLABS_API_KEY:-}"
-# Transcriber backend: ElevenLabs only
-export OMEGA_TRANSCRIBER="${OMEGA_TRANSCRIBER:-elevenlabs}"
+# Normalize DB env names so sync + async DB clients use the same target.
+export DB_HOST="${DB_HOST:-${OMEGA_PG_HOST:-127.0.0.1}}"
+export DB_PORT="${DB_PORT:-${OMEGA_PG_PORT:-5432}}"
+export DB_NAME="${DB_NAME:-${OMEGA_PG_DB:-postgres}}"
+if [ -z "${DB_USER:-}" ] && [ -n "${OMEGA_PG_USER:-}" ]; then export DB_USER="${OMEGA_PG_USER}"; fi
+if [ -z "${DB_PASS:-}" ] && [ -n "${OMEGA_PG_PASS:-}" ]; then export DB_PASS="${OMEGA_PG_PASS}"; fi
 
-# --- SUBTITLE TIMING CONTROLS (finalizer) ---
-# Modes: balanced (default, readability-first) or strict (tight sync, minimal extension)
-# export OMEGA_TIMING_MODE="${OMEGA_TIMING_MODE:-balanced}"
-# In strict mode, allow a small tail after last word (seconds)
-# export OMEGA_TIMING_STRICT_MAX_EXTEND="${OMEGA_TIMING_STRICT_MAX_EXTEND:-0.15}"
-# In strict mode, optional fallback shift when fragment timing is missing (seconds)
-# export OMEGA_TIMING_STRICT_FRAGMENT_SHIFT="${OMEGA_TIMING_STRICT_FRAGMENT_SHIFT:-0.0}"
+# Pick Python once and pass to PM2 ecosystem.
+python_has_runtime_deps() {
+  local py="$1"
+  "$py" - <<'PY' >/dev/null 2>&1
+import importlib.util
+import sys
+required = ("fastapi", "uvicorn", "vertexai")
+missing = [name for name in required if importlib.util.find_spec(name) is None]
+sys.exit(0 if not missing else 1)
+PY
+}
 
-# Pick Python (prefer venv if present)
-BASE_DIR="$(pwd)"
-if [ -n "${OMEGA_VENV_PY:-}" ] && [ -x "${OMEGA_VENV_PY:-}" ]; then
-  OMEGA_PYTHON="${OMEGA_VENV_PY}"
-elif [ -x "$BASE_DIR/.venv/bin/python3" ]; then
-  OMEGA_PYTHON="$BASE_DIR/.venv/bin/python3"
-else
-  OMEGA_PYTHON="python3"
+pick_python() {
+  local candidate
+  local fallback=""
+  local candidates=()
+
+  if [ -n "${OMEGA_PYTHON:-}" ]; then candidates+=("${OMEGA_PYTHON}"); fi
+  if [ -n "${OMEGA_VENV_PY:-}" ]; then candidates+=("${OMEGA_VENV_PY}"); fi
+
+  candidates+=(
+    "$BASE_DIR/.venv/bin/python3"
+    "/opt/homebrew/bin/python3.12"
+    "/opt/homebrew/bin/python3.11"
+    "/usr/local/bin/python3.12"
+    "/usr/local/bin/python3.11"
+    "/usr/local/bin/python3.10"
+    "/usr/bin/python3"
+  )
+
+  for candidate in "${candidates[@]}"; do
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+      if [ -z "$fallback" ]; then fallback="$candidate"; fi
+      if python_has_runtime_deps "$candidate"; then
+        echo "$candidate"
+        return 0
+      fi
+    fi
+  done
+
+  if command -v python3 >/dev/null 2>&1; then
+    candidate="$(command -v python3)"
+    if [ -z "$fallback" ]; then fallback="$candidate"; fi
+    if python_has_runtime_deps "$candidate"; then
+      echo "$candidate"
+      return 0
+    fi
+  fi
+
+  if [ -n "$fallback" ]; then
+    echo "$fallback"
+    return 0
+  fi
+
+  return 1
+}
+
+if ! OMEGA_PYTHON="$(pick_python)"; then
+  echo "🛑 Python 3 interpreter not found."
+  exit 1
 fi
 export OMEGA_PYTHON
-
-# Ensure user-installed Python CLI tools are on PATH
-PY_USER_BIN="$($OMEGA_PYTHON -m site --user-base 2>/dev/null)/bin"
-if [ -d "$PY_USER_BIN" ]; then
-  export PATH="$PY_USER_BIN:$PATH"
+echo "🐍 Python runtime: $OMEGA_PYTHON ($("$OMEGA_PYTHON" -V 2>&1))"
+if ! python_has_runtime_deps "$OMEGA_PYTHON"; then
+  echo "🛑 Selected Python runtime is missing required runtime deps (fastapi/uvicorn/vertexai): $OMEGA_PYTHON"
+  echo "   Install with: $OMEGA_PYTHON -m pip install -r requirements.runtime.txt"
+  exit 1
+fi
+if "$OMEGA_PYTHON" - <<'PY' >/dev/null 2>&1
+import sys
+sys.exit(0 if sys.version_info >= (3, 10) else 1)
+PY
+then
+  :
+else
+  echo "⚠️  Python < 3.10 detected. System can run, but upgrade to 3.11+ is recommended."
 fi
 
-# Review Portal Configuration
-export OMEGA_REVIEW_PORTAL_ENABLED="${OMEGA_REVIEW_PORTAL_ENABLED:-0}"
-export OMEGA_REVIEW_PORTAL_URL="${OMEGA_REVIEW_PORTAL_URL:-https://omega-review-283123700702.us-central1.run.app}"
-export OMEGA_REVIEW_SECRET="${OMEGA_REVIEW_SECRET:-omega-review-secret-2024}"
-
-# 1. Check if already running
-if [ -f "$LOCK_FILE" ]; then
-    PID=$(cat "$LOCK_FILE")
-    if ps -p $PID > /dev/null; then
-        echo "❌ Manager is already running (PID: $PID)"
-        exit 1
-    else
-        echo "⚠️ Found stale lock file. Cleaning up..."
-        rm "$LOCK_FILE"
-    fi
+# Resolve PM2 (global first, then local project installs).
+PM2_BIN="${OMEGA_PM2_BIN:-}"
+if [ -n "$PM2_BIN" ] && [ ! -x "$PM2_BIN" ]; then
+  echo "🛑 OMEGA_PM2_BIN points to a non-executable path: $PM2_BIN"
+  exit 1
 fi
+if [ -z "$PM2_BIN" ] && command -v pm2 >/dev/null 2>&1; then
+  PM2_BIN="$(command -v pm2)"
+fi
+if [ -z "$PM2_BIN" ] && [ -x "$BASE_DIR/node_modules/.bin/pm2" ]; then
+  PM2_BIN="$BASE_DIR/node_modules/.bin/pm2"
+fi
+if [ -z "$PM2_BIN" ] && [ -x "$BASE_DIR/omega-frontend/node_modules/.bin/pm2" ]; then
+  PM2_BIN="$BASE_DIR/omega-frontend/node_modules/.bin/pm2"
+fi
+if [ -z "$PM2_BIN" ]; then
+  echo "🛑 PM2 not found."
+  echo "   Install with ./scripts/install_pm2.sh (or npm i -g pm2)"
+  exit 1
+fi
+echo "🔧 PM2 runtime: $PM2_BIN"
 
-# 2. Start Dashboard
-echo "📊 Starting Dashboard..."
-nohup "$OMEGA_PYTHON" dashboard.py > logs/dashboard.log 2>&1 &
-DASH_PID=$!
-echo "   Dashboard PID: $DASH_PID"
-echo "   Backend API: http://127.0.0.1:8080"
+# Frontend contract checks (fail fast)
+validate_frontend_env_contract() {
+  local env_file="$BASE_DIR/omega-frontend/.env.local"
+  local api_url=""
+  local socket_url=""
+  local allow_api_override="${OMEGA_ALLOW_FRONTEND_API_OVERRIDE:-0}"
+  local allow_socket_override="${OMEGA_ALLOW_FRONTEND_SOCKET_OVERRIDE:-0}"
 
-# 2.1 Start Frontend (Next.js)
-FRONTEND_ENABLED=$(echo "${OMEGA_FRONTEND_ENABLED}" | tr '[:upper:]' '[:lower:]')
-if [ "$FRONTEND_ENABLED" = "1" ] || [ "$FRONTEND_ENABLED" = "true" ] || [ "$FRONTEND_ENABLED" = "yes" ] || [ "$FRONTEND_ENABLED" = "on" ]; then
-  # Clean up orphaned frontend processes from previous runs to avoid multi-port drift.
-  FRONTEND_PATH_PATTERN="$BASE_DIR/omega-frontend/node_modules/.bin/next"
-  ORPHAN_FRONTEND_PIDS=$(ps aux | grep "$FRONTEND_PATH_PATTERN" | awk '{print $2}')
-  if [ -n "$ORPHAN_FRONTEND_PIDS" ]; then
-    echo "🧹 Cleaning orphaned Frontend PIDs: $ORPHAN_FRONTEND_PIDS"
-    kill -9 $ORPHAN_FRONTEND_PIDS 2>/dev/null
-    rm -f "$FRONTEND_PID_FILE"
-    sleep 1
+  if [ -f "$env_file" ]; then
+    api_url="$(grep -E '^NEXT_PUBLIC_API_URL=' "$env_file" | tail -n 1 | cut -d= -f2- || true)"
+    socket_url="$(grep -E '^NEXT_PUBLIC_SOCKET_URL=' "$env_file" | tail -n 1 | cut -d= -f2- || true)"
   fi
-  NEXT_SERVER_PIDS=$(ps aux | awk '/[n]ext-server/{print $2}')
-  ORPHAN_NEXT_SERVER_PIDS=""
-  for pid in $NEXT_SERVER_PIDS; do
-    cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)
-    case "$cwd" in
-      */Azotus/omega-frontend*)
-        ORPHAN_NEXT_SERVER_PIDS="$ORPHAN_NEXT_SERVER_PIDS $pid"
+
+  if [ -n "$api_url" ] && [ "$allow_api_override" != "1" ]; then
+    echo "🛑 Frontend env contract violation: NEXT_PUBLIC_API_URL must be empty in omega-frontend/.env.local."
+    echo "   Found: $api_url"
+    echo "   To allow explicit override, set OMEGA_ALLOW_FRONTEND_API_OVERRIDE=1."
+    exit 1
+  fi
+
+  if [ -n "$api_url" ] && [ "$allow_api_override" = "1" ]; then
+    case "$api_url" in
+      "http://127.0.0.1:${OMEGA_FASTAPI_PORT}"|"http://localhost:${OMEGA_FASTAPI_PORT}")
+        ;;
+      *)
+        echo "🛑 Frontend env contract violation: unsupported NEXT_PUBLIC_API_URL override '$api_url'."
+        echo "   Allowed local overrides:"
+        echo "   - http://127.0.0.1:${OMEGA_FASTAPI_PORT}"
+        echo "   - http://localhost:${OMEGA_FASTAPI_PORT}"
+        exit 1
         ;;
     esac
-  done
-  if [ -n "$ORPHAN_NEXT_SERVER_PIDS" ]; then
-    echo "🧹 Cleaning orphaned next-server PIDs:$ORPHAN_NEXT_SERVER_PIDS"
-    kill -9 $ORPHAN_NEXT_SERVER_PIDS 2>/dev/null
-    rm -f "$FRONTEND_PID_FILE"
-    sleep 1
   fi
 
-  if [ -f "$FRONTEND_PID_FILE" ]; then
-    OLD_FRONTEND_PID=$(cat "$FRONTEND_PID_FILE" 2>/dev/null)
-    if [ -n "$OLD_FRONTEND_PID" ] && kill -0 "$OLD_FRONTEND_PID" 2>/dev/null; then
-      echo "🌐 Frontend already running (PID: $OLD_FRONTEND_PID)"
-    else
-      rm -f "$FRONTEND_PID_FILE"
-    fi
+  if [ -n "$socket_url" ] && [ "$allow_socket_override" != "1" ]; then
+    echo "🛑 Frontend env contract violation: NEXT_PUBLIC_SOCKET_URL must be empty in omega-frontend/.env.local."
+    echo "   Found: $socket_url"
+    echo "   To allow explicit override, set OMEGA_ALLOW_FRONTEND_SOCKET_OVERRIDE=1."
+    exit 1
   fi
+}
 
-  if [ ! -f "$FRONTEND_PID_FILE" ]; then
-    if command -v npm >/dev/null 2>&1; then
-      FRONTEND_DIR="$BASE_DIR/omega-frontend"
-      if [ -d "$FRONTEND_DIR" ]; then
-        if [ -f "$FRONTEND_DIR/.next/BUILD_ID" ]; then
-          echo "🌐 Starting Frontend (Next.js - production)..."
-          nohup npm --prefix "$FRONTEND_DIR" run start > logs/frontend.log 2>&1 &
-        else
-          echo "🌐 Starting Frontend (Next.js - dev)..."
-          nohup npm --prefix "$FRONTEND_DIR" run dev > logs/frontend.log 2>&1 &
-        fi
-        FRONTEND_PID=$!
-        echo $FRONTEND_PID > "$FRONTEND_PID_FILE"
-        echo "   Frontend PID: $FRONTEND_PID"
-        echo "   Frontend: $OMEGA_FRONTEND_URL"
-      else
-        echo "⚠️ Frontend directory missing: $FRONTEND_DIR"
-      fi
-    else
-      echo "⚠️ npm not found. Frontend not started."
-    fi
+validate_frontend_build_contract() {
+  local frontend_dir="$BASE_DIR/omega-frontend"
+  if [ "${OMEGA_FRONTEND_ENABLED:-1}" != "1" ]; then
+    return 0
   fi
+  if [ ! -d "$frontend_dir" ]; then
+    echo "🛑 Frontend directory missing: $frontend_dir"
+    exit 1
+  fi
+  if [ ! -f "$frontend_dir/.next/standalone/server.js" ]; then
+    echo "🛑 Frontend build contract violation: missing .next/standalone/server.js"
+    echo "   Build required: cd omega-frontend && npm run build"
+    exit 1
+  fi
+  if [ ! -d "$frontend_dir/.next/static" ]; then
+    echo "🛑 Frontend build contract violation: missing .next/static"
+    echo "   Build required: cd omega-frontend && npm run build"
+    exit 1
+  fi
+}
+
+validate_frontend_env_contract
+validate_frontend_build_contract
+
+# Ensure clean slate unless explicitly skipped.
+if [ "${OMEGA_SKIP_STOP:-0}" != "1" ]; then
+  ./stop_all.sh
 fi
 
-# 2.5 Check external storage readiness (symlink targets writable)
-# Skip SSD check if OMEGA_LOCAL_TEST=1 (for testing without external drive)
-if [ "${OMEGA_LOCAL_TEST:-0}" = "1" ]; then
-  echo "💾 LOCAL TEST MODE - skipping SSD check"
-  DRIVE_PATH="$HOME/OmegaTest"
-else
+# Validate storage readiness.
+if [ "${OMEGA_LOCAL_TEST:-0}" != "1" ]; then
   DRIVE_PATH="${OMEGA_DRIVE_PATH:-/Volumes/Extreme SSD}"
+  WAIT_SECONDS="${OMEGA_DRIVE_WAIT_SECONDS:-120}"
+  STEP_SECONDS=5
+  ELAPSED=0
+  echo "💾 Checking Storage: $DRIVE_PATH"
+  until [ -d "$DRIVE_PATH" ]; do
+    if [ "$ELAPSED" -ge "$WAIT_SECONDS" ]; then
+      echo "🛑 Storage not mounted after ${WAIT_SECONDS}s: $DRIVE_PATH"
+      exit 1
+    fi
+    echo "⚠️  Drive not found yet, waiting ${STEP_SECONDS}s... (${ELAPSED}/${WAIT_SECONDS}s)"
+    sleep "$STEP_SECONDS"
+    ELAPSED=$((ELAPSED + STEP_SECONDS))
+  done
 fi
-echo "💾 Checking Storage: $DRIVE_PATH"
 
-# Wait Loop
-retries=0
-while [ ! -d "$DRIVE_PATH" ]; do
-    echo "⚠️  WARNING: Drive not found! Waiting 10s... (Attempt $((retries+1)))"
-    sleep 10
-    retries=$((retries+1))
-    
-    # Alert at 2 minutes (12 * 10s = 120s)
-    if [ $retries -eq 12 ]; then
-        echo "🚨 ALERT: Critical Drive Failure (2 mins). Sending notification..."
-        "$OMEGA_PYTHON" scripts/check_drive_alert.py 2
-    fi
-    # Re-alert at 10 minutes
-    if [ $retries -eq 60 ]; then
-        "$OMEGA_PYTHON" scripts/check_drive_alert.py 10
-    fi
-done
-
-echo "   ✅ Drive Mounted. Verifying configuration..."
-if "$OMEGA_PYTHON" - <<'PY'
+if ! "$OMEGA_PYTHON" - <<'PY'
 import sys
 import config
 sys.exit(0 if config.critical_paths_ready(require_write=True) else 1)
 PY
 then
-  echo "   ✅ Storage and Paths ready"
+  echo "🛑 Critical paths not writable/ready. Aborting startup."
+  exit 1
+fi
+echo "✅ Storage and paths ready"
+
+# Pre-flight validation.
+if [ "${OMEGA_SKIP_PREFLIGHT:-0}" = "1" ]; then
+  echo "⏭️  Skipping pre-flight checks (OMEGA_SKIP_PREFLIGHT=1)."
 else
-  echo "   ❌ Config validation failed despite drive presence. Proceeding with caution."
-fi
-
-# 2.7 Start Cloud SQL Auth Proxy (if using PostgreSQL)
-CLOUD_SQL_PROXY_PID_FILE="/tmp/omega_cloud_sql_proxy.pid"
-if [ "${DB_TYPE:-postgres}" = "postgres" ]; then
-  echo "🗄️  PostgreSQL mode enabled. Starting Cloud SQL Auth Proxy..."
-
-  # Check if proxy is already running
-  if [ -f "$CLOUD_SQL_PROXY_PID_FILE" ]; then
-    OLD_PROXY_PID=$(cat "$CLOUD_SQL_PROXY_PID_FILE" 2>/dev/null)
-    if [ -n "$OLD_PROXY_PID" ] && kill -0 "$OLD_PROXY_PID" 2>/dev/null; then
-      echo "   ✅ Cloud SQL Proxy already running (PID: $OLD_PROXY_PID)"
-    else
-      rm -f "$CLOUD_SQL_PROXY_PID_FILE"
-    fi
+  PREFLIGHT_RESULT=0
+  if [ -f "preflight_check.py" ]; then
+    "$OMEGA_PYTHON" preflight_check.py || PREFLIGHT_RESULT=$?
+  elif [ -f "preflight.py" ]; then
+    "$OMEGA_PYTHON" preflight.py || PREFLIGHT_RESULT=$?
   fi
-
-  # Start proxy if not running
-  if [ ! -f "$CLOUD_SQL_PROXY_PID_FILE" ]; then
-    if command -v cloud-sql-proxy >/dev/null 2>&1; then
-      INSTANCE="${OMEGA_CLOUD_SQL_INSTANCE:-sermon-translator-system:us-central1:omega-sql-prod}"
-      nohup cloud-sql-proxy "$INSTANCE" --port="${OMEGA_PG_PORT:-5432}" > logs/cloud_sql_proxy.log 2>&1 &
-      PROXY_PID=$!
-      echo $PROXY_PID > "$CLOUD_SQL_PROXY_PID_FILE"
-      echo "   Cloud SQL Proxy started (PID: $PROXY_PID)"
-
-      # Wait for proxy to be ready (max 10 seconds)
-      echo "   Waiting for proxy to be ready..."
-      for i in $(seq 1 10); do
-        if nc -z 127.0.0.1 "${OMEGA_PG_PORT:-5432}" 2>/dev/null; then
-          echo "   ✅ Cloud SQL Proxy ready"
-          break
-        fi
-        sleep 1
-        if [ $i -eq 10 ]; then
-          echo "   ⚠️  Cloud SQL Proxy may not be ready yet, proceeding anyway"
-        fi
-      done
-    else
-      echo "   ❌ cloud-sql-proxy not found! Install with: brew install cloud-sql-proxy"
-      echo "   Falling back to direct connection (may fail if not on Cloud Run)"
-    fi
-  fi
-fi
-
-# 2.8 Pre-Flight System Check (validates GCS, Vertex, FFmpeg, etc.)
-echo "🔍 Running Comprehensive Pre-Flight Check..."
-PREFLIGHT_RESULT=0
-if [ -f "preflight_check.py" ]; then
-  "$OMEGA_PYTHON" preflight_check.py
-  PREFLIGHT_RESULT=$?
-else
-  # Fallback to old preflight.py
-  "$OMEGA_PYTHON" preflight.py
-  PREFLIGHT_RESULT=$?
-fi
-
-if [ $PREFLIGHT_RESULT -eq 0 ]; then
-  echo "   ✅ All systems operational"
-elif [ $PREFLIGHT_RESULT -eq 2 ]; then
-  echo ""
-  echo "   ⚠️  Pre-flight check found warnings. Review above."
-  echo "   System will start, but some features may not work optimally."
-  echo ""
-elif [ $PREFLIGHT_RESULT -eq 1 ]; then
-  echo ""
-  echo "   🛑 CRITICAL: Pre-flight check failed!"
-  echo "   Fix the issues above before starting the system."
-  echo ""
-  # Allow override with OMEGA_FORCE_START=1
-  if [ "${OMEGA_FORCE_START:-0}" = "1" ]; then
-    echo "   ⚠️  OMEGA_FORCE_START=1 set - proceeding despite failures..."
-  else
-    echo "   Set OMEGA_FORCE_START=1 to override (not recommended)"
-    # Kill dashboard (and frontend if running)
-    kill $DASH_PID 2>/dev/null
-    if [ -f "$FRONTEND_PID_FILE" ]; then
-      FRONTEND_PID=$(cat "$FRONTEND_PID_FILE" 2>/dev/null)
-      if [ -n "$FRONTEND_PID" ]; then
-        kill "$FRONTEND_PID" 2>/dev/null
-      fi
-      rm -f "$FRONTEND_PID_FILE"
-    fi
+  if [ "$PREFLIGHT_RESULT" -eq 1 ] && [ "${OMEGA_FORCE_START:-0}" != "1" ]; then
+    echo "🛑 Pre-flight failed. Set OMEGA_FORCE_START=1 to override."
     exit 1
   fi
 fi
 
-# 3. Start Manager in background
-nohup "$OMEGA_PYTHON" omega_manager.py > /dev/null 2>&1 &
+echo "⚙️  Starting unified stack with PM2..."
+OMEGA_PYTHON="$OMEGA_PYTHON" "$PM2_BIN" start ecosystem.config.js --update-env >/dev/null
+"$PM2_BIN" save >/dev/null 2>&1 || true
 
-# 3. Capture PID
-NEW_PID=$!
-echo "✅ Manager started with PID: $NEW_PID"
+"$PM2_BIN" status
+echo "✅ Omega stack running under PM2."
+echo "   FastAPI:  http://${OMEGA_FASTAPI_HOST}:${OMEGA_FASTAPI_PORT}"
+echo "   Frontend: http://127.0.0.1:${OMEGA_FRONTEND_PORT}"
 
-# 3.1 Start Cloud Sync daemon (optional)
-SYNC_ENABLED=$(echo "${OMEGA_CLOUD_SYNC_ENABLED}" | tr '[:upper:]' '[:lower:]')
-if [ "$SYNC_ENABLED" = "1" ] || [ "$SYNC_ENABLED" = "true" ] || [ "$SYNC_ENABLED" = "yes" ] || [ "$SYNC_ENABLED" = "on" ]; then
-  nohup "$OMEGA_PYTHON" cloud_sync_service.py > logs/cloud_sync.log 2>&1 &
-  CLOUD_SYNC_PID=$!
-  echo $CLOUD_SYNC_PID > "$CLOUD_SYNC_PID_FILE"
-  echo "☁️ Cloud Sync started with PID: $CLOUD_SYNC_PID"
-fi
-
-# 3.5 Keep Mac awake while manager runs (prevents sleep stalls)
-if command -v caffeinate >/dev/null 2>&1; then
-  caffeinate -dimsu -w "$NEW_PID" >/dev/null 2>&1 &
-  echo $! > "$CAFFEINATE_PID_FILE"
-  echo "☕ Caffeinate active (PID: $(cat "$CAFFEINATE_PID_FILE"))"
-fi
-
-# 3.6 Start watchdog supervisor (keeps watchdog alive)
-if [ -f "$WATCHDOG_SUP_PID_FILE" ]; then
-  OLD_SUP_PID=$(cat "$WATCHDOG_SUP_PID_FILE" 2>/dev/null)
-  if [ -n "$OLD_SUP_PID" ] && kill -0 "$OLD_SUP_PID" 2>/dev/null; then
-    echo "🐶 Watchdog supervisor already running (PID: $OLD_SUP_PID)"
-  else
-    rm -f "$WATCHDOG_SUP_PID_FILE"
-  fi
-fi
-if [ ! -f "$WATCHDOG_SUP_PID_FILE" ]; then
-  nohup "$OMEGA_PYTHON" watchdog_supervisor.py > logs/watchdog_supervisor.log 2>&1 &
-  echo $! > "$WATCHDOG_SUP_PID_FILE"
-  echo "🐶 Watchdog supervisor started (PID: $(cat "$WATCHDOG_SUP_PID_FILE"))"
-fi
-
-# 4. Tail the log file so user sees immediate feedback
 if [ "${OMEGA_NO_TAIL:-0}" = "1" ]; then
   exit 0
 fi
-echo "📜 Tailing logs (Ctrl+C to exit tail, Manager will keep running)..."
-echo "----------------------------------------------------------------"
-tail -f "$LOG_FILE"
+
+echo "📜 Streaming PM2 logs (Ctrl+C to detach; services keep running)..."
+"$PM2_BIN" logs --lines 80

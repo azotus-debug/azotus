@@ -1,5 +1,20 @@
 # Azotus Runbook (Stable Hybrid)
 
+## Stabilization Freeze
+- Charter: [docs/stabilization/00-freeze-charter.md](/Users/haukurhauksson/Azotus/docs/stabilization/00-freeze-charter.md)
+- Inventory/Risk Matrix: [docs/stabilization/01-inventory-and-risk-matrix.md](/Users/haukurhauksson/Azotus/docs/stabilization/01-inventory-and-risk-matrix.md)
+- Owners template: [docs/stabilization/owners-template.md](/Users/haukurhauksson/Azotus/docs/stabilization/owners-template.md)
+- Execution log: [docs/stabilization/02-execution-log.md](/Users/haukurhauksson/Azotus/docs/stabilization/02-execution-log.md)
+- Runtime contract: [docs/stabilization/03-runtime-contract.md](/Users/haukurhauksson/Azotus/docs/stabilization/03-runtime-contract.md)
+- Scripts: [scripts/stabilization/README.md](/Users/haukurhauksson/Azotus/scripts/stabilization/README.md)
+
+Required gate commands:
+- `./scripts/stabilization/smoke_gate.sh`
+- `./scripts/stabilization/library_integrity_gate.sh`
+- `./scripts/stabilization/capture_baseline.sh`
+- `OMEGA_RESTART_LOOPS=10 ./scripts/stabilization/restart_gate.sh`
+- `./scripts/stabilization/release_gate.sh`
+
 ## Architecture (Canonical)
 - **Local Mac**: ingest video, extract audio, make proxy/thumbnail, finalize SRT, burn video.
 - **Cloud**: Vertex AI translation + review/polish, artifacts in GCS.
@@ -30,8 +45,12 @@ Optional:
 - `OMEGA_CLOUD_SYNC_POLL_SECONDS=60`
 
 ## Start / Stop
-- Start: `./start_omega.sh`
+- Install PM2 once: `./scripts/install_pm2.sh` (or `npm i -g pm2`)
+- If PM2 is installed locally, set `OMEGA_PM2_BIN=/absolute/path/to/pm2`
+- Start: `OMEGA_NO_TAIL=1 ./start_omega.sh`
 - Stop: `./stop_all.sh`
+- Status: `pm2 status` (or use `$OMEGA_PM2_BIN status`)
+- Logs: `pm2 logs --lines 100` (or use `$OMEGA_PM2_BIN logs --lines 100`)
 
 
 ## Pipeline (Local-first + Cloud)
@@ -59,7 +78,7 @@ Proxy details:
 - Jobs without station_id are ignored unless `OMEGA_STATION_CLAIM_UNASSIGNED=1`.
 
 ## Troubleshooting
-- Check logs: `logs/manager.log`, `logs/dashboard.log`
+- Check logs: `logs/manager.err.log`, `logs/fastapi.err.log`, `logs/frontend.err.log`, `logs/cloud_sync.err.log`
 - Health endpoint: `/api/health`
 - Ops view: `/ops` in UI (Programs/Tracks shell)
 
