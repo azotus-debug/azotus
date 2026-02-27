@@ -17,6 +17,8 @@ from gcs_jobs import GcsJobPaths, blob_exists, download_json, try_download_json
 from lock_manager import ProcessLock
 from profiles import LANGUAGES
 from artifact_lock import job_artifact_lock
+from transition_service import execute_transition, apply_transition
+from workers.text_sanitizer import repair_tab_escaped_t
 
 LOG = logging.getLogger("OmegaCloudSync")
 
@@ -90,6 +92,29 @@ DEADMAN_STAGES = {
     "CLOUD_REVIEWING",
 }
 
+
+def _deadman_minutes_for_stage(stage: str) -> int:
+    """
+    Return dead-man timeout (minutes) for a stage.
+
+    By default, TRANSLATING_CLOUD_SUBMITTED is disabled because Cloud Run
+    scheduling delays can exceed the generic dead-man threshold.
+    """
+    global_minutes = int(getattr(config, "OMEGA_CLOUD_DEADMAN_MINUTES", 0) or 0)
+    stage_upper = str(stage or "").upper()
+
+    if stage_upper == "TRANSLATING_CLOUD_SUBMITTED":
+        # Allow explicit override; default disabled to avoid false DEAD on queued cloud jobs.
+        return int(os.environ.get("OMEGA_CLOUD_DEADMAN_SUBMITTED_MINUTES", "0") or 0)
+
+    if stage_upper == "CLOUD_TRANSLATING":
+        return int(os.environ.get("OMEGA_CLOUD_DEADMAN_TRANSLATING_MINUTES", str(global_minutes)) or 0)
+
+    if stage_upper == "CLOUD_REVIEWING":
+        return int(os.environ.get("OMEGA_CLOUD_DEADMAN_REVIEWING_MINUTES", str(global_minutes)) or 0)
+
+    return global_minutes
+
 LANG_NAME_MAP = {
     str(info.get("name", "")).strip().lower(): code
     for code, info in LANGUAGES.items()
@@ -147,13 +172,12 @@ def _progress_recent(storage_client: storage.Client, job_id: Optional[str], cuto
 
 
 def _apply_deadman(storage_client: storage.Client) -> int:
-    minutes = int(getattr(config, "OMEGA_CLOUD_DEADMAN_MINUTES", 0) or 0)
-    if minutes <= 0:
-        return 0
-
-    cutoff = datetime.now() - timedelta(minutes=minutes)
     stages = sorted(DEADMAN_STAGES)
     if not stages:
+        return 0
+
+    has_deadman_enabled = any(_deadman_minutes_for_stage(stage) > 0 for stage in stages)
+    if not has_deadman_enabled:
         return 0
 
     placeholders = ", ".join(["?"] * len(stages))
@@ -168,6 +192,12 @@ def _apply_deadman(storage_client: storage.Client) -> int:
     dead_count = 0
     for row in rows:
         record = dict(row) if hasattr(row, "keys") else row
+        stage = str(record.get("stage") or "").upper()
+        minutes = _deadman_minutes_for_stage(stage)
+        if minutes <= 0:
+            continue
+        cutoff = datetime.now() - timedelta(minutes=minutes)
+
         updated_at = _parse_iso_timestamp(record.get("updated_at"))
         if not updated_at:
             continue
@@ -178,6 +208,18 @@ def _apply_deadman(storage_client: storage.Client) -> int:
         if _progress_recent(storage_client, record.get("job_id"), cutoff):
             continue
 
+        job_id = record.get("job_id") or record.get("id")
+        current_stage = record.get("stage") or "UNKNOWN"
+        try:
+            execute_transition(
+                job_id=job_id, job_stem=job_id,
+                from_stage=current_stage, to_stage="DEAD",
+                worker_id="cloud_sync:deadman",
+                reason=f"Dead-man timeout after {minutes}m",
+                skip_validation=True,
+            )
+        except Exception as te:
+            LOG.warning("Transition audit failed for %s: %s", job_id, te)
         omega_db.update_track(
             record.get("id"),
             stage="DEAD",
@@ -560,12 +602,21 @@ def _sync_approved_blob(
         if not isinstance(raw_segments, list) or not raw_segments:
             return raw_payload
 
+        repaired_segments = []
+        for seg in raw_segments:
+            if not isinstance(seg, dict):
+                repaired_segments.append(seg)
+                continue
+            fixed_seg = dict(seg)
+            fixed_seg["text"] = repair_tab_escaped_t(fixed_seg.get("text", ""))
+            repaired_segments.append(fixed_seg)
+
         from workers import finalizer
 
         job = omega_db.get_job_via_track(job_id) or {}
         target_language = str(job.get("target_language") or "is").strip().lower() or "is"
         normalized_segments = finalizer.normalize_segments_for_review(
-            raw_segments,
+            repaired_segments,
             target_language=target_language,
         )
 
@@ -575,6 +626,7 @@ def _sync_approved_blob(
                 "end": seg.get("end"),
                 "text": seg.get("text"),
                 "speaker": seg.get("speaker"),
+                **({"words": seg["words"]} if "words" in seg else {}),
             }
             for seg in normalized_segments
         ]
@@ -583,9 +635,15 @@ def _sync_approved_blob(
             normalized_payload = dict(raw_payload)
         else:
             normalized_payload = {}
+        previous_segments = normalized_payload.get("segments") if isinstance(normalized_payload.get("segments"), list) else None
+        previous_normalized_at = normalized_payload.get("normalized_at")
         normalized_payload["segments"] = cleaned_segments
         normalized_payload["normalized_for_review"] = True
-        normalized_payload["normalized_at"] = datetime.now().isoformat()
+        # Idempotent marker: only refresh normalized_at when segment content actually changes.
+        if previous_segments != cleaned_segments or not isinstance(previous_normalized_at, str) or not previous_normalized_at.strip():
+            normalized_payload["normalized_at"] = datetime.now().isoformat()
+        else:
+            normalized_payload["normalized_at"] = previous_normalized_at
         return normalized_payload
 
     tmp_dir = config.TRANSLATED_DONE_DIR
@@ -669,19 +727,42 @@ def _advance_track(
     if should_update:
         current_progress = float(track.get("progress") or 0.0)
         progress = max(current_progress, 70.0)
-        omega_db.update_job_via_track(
-            job_id,
-            stage="REVIEWED",
-            status="Approved (cloud)",
-            progress=progress,
-            meta=meta_updates,
-            target_language=target_language,
-            program_profile=program_profile,
-            subtitle_style=subtitle_style,
-            client=client,
-            due_date=due_date,
-            title=title,
-        )
+        # Clear halted flag — if stall detector marked this DEAD but Cloud Run
+        # actually completed, the track is no longer halted.
+        meta_updates["halted"] = False
+        meta_updates["stall_restart_count"] = 0
+        try:
+            apply_transition(
+                job_id=job_id, job_stem=job_id,
+                from_stage=current_stage, to_stage="REVIEWED",
+                worker_id="cloud_sync:advance",
+                reason="Cloud translation approved",
+                skip_validation=True,
+                status="Approved (cloud)",
+                progress=progress,
+                meta=meta_updates,
+                target_language=target_language,
+                program_profile=program_profile,
+                subtitle_style=subtitle_style,
+                client=client,
+                due_date=due_date,
+                title=title,
+            )
+        except Exception as te:
+            LOG.warning("apply_transition failed for %s, falling back: %s", job_id, te)
+            omega_db.update_job_via_track(
+                job_id,
+                stage="REVIEWED",
+                status="Approved (cloud)",
+                progress=progress,
+                meta=meta_updates,
+                target_language=target_language,
+                program_profile=program_profile,
+                subtitle_style=subtitle_style,
+                client=client,
+                due_date=due_date,
+                title=title,
+            )
     else:
         omega_db.update_job_via_track(
             job_id,

@@ -1,5 +1,16 @@
+# ============================================================
+# .gcloudignore — controls what gcloud builds submit uploads
+# The cloud worker Dockerfile only needs:
+#   config.py, config/, profiles.py, gcp_auth.py, gcs_jobs.py,
+#   omega_cloud_worker.py, subtitle_standards.py, utils/,
+#   workers/__init__.py, workers/pre_segmenter.py, workers/translation_engine.py,
+#   cloud/requirements.txt, cloud/Dockerfile
+# Everything else should be excluded.
+# ============================================================
+
 # Secrets
 .env
+.env.backup
 .omega_secrets
 service_account.json
 
@@ -7,14 +18,14 @@ service_account.json
 *.db
 *.sqlite
 
-# Runtime
+# Runtime / logs
 logs/
 heartbeats/
 __pycache__/
 *.pyc
 *.pyo
 
-# Local media folders
+# Local media folders (huge)
 1_INBOX/
 2_VAULT/
 3_EDITOR/
@@ -24,12 +35,57 @@ __pycache__/
 0_STAGE/
 0_DROPZONE/
 5_ARCHIVE/
+temp_render/
 
-# Node (Global ignore)
+# Frontend (not needed for cloud worker)
+omega-frontend/
+
+# Node (safety net)
 **/node_modules/
 **/.next/
-omega-frontend/node_modules/
-cloud/review_portal/frontend/node_modules/
+
+# Tests / scripts / docs (not needed in image)
+docs/
+tests/
+scripts/
+prompts/
+validators/
+
+# Misc files not needed
+*.md
+editor_report.json
+translation_draft.json
+dashboard.py
+omega_db.py
+omega_manager.py
+process_watchdog.py
+watchdog_supervisor.py
+cloud_sync_service.py
+transition_service.py
+state_machine.py
+start_omega.sh
+stop_all.sh
+artifact_lock.py
+recover_orphan_job.py
+
+# Workers (only keep __init__.py, pre_segmenter.py, and translation_engine.py for cloud worker)
+workers/assistant.py
+workers/audio_classifier.py
+workers/audio_clipper.py
+workers/base_worker.py
+workers/dubber.py
+workers/editor.py
+workers/finalizer.py
+workers/ocr_layout.py
+workers/proxy_generator.py
+workers/publisher.py
+workers/remote_review.py
+workers/review_notifier.py
+workers/timing_utils.py
+workers/transcriber.py
+workers/transcriber_elevenlabs.py
+workers/vision_scanner.py
+workers/vocal_extractor.py
 
 # Git
 .git/

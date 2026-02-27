@@ -111,10 +111,10 @@ def _scenario_state_machine_guardrails() -> None:
 
 
 def _scenario_subtitle_linebreak_preserved() -> None:
-    from workers.finalizer import _strip_metadata_tags
+    from workers.finalizer.formatting import strip_metadata_tags
 
     input_text = "First line\\n<APPLAUSE>\\nSecond line"
-    output = _strip_metadata_tags(input_text)
+    output = strip_metadata_tags(input_text)
     if "\\n" not in output:
         raise AssertionError("Expected metadata cleaning to preserve subtitle line breaks")
     if "APPLAUSE" in output:

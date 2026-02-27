@@ -14,9 +14,12 @@ COPY gcs_jobs.py /app/gcs_jobs.py
 COPY omega_cloud_worker.py /app/omega_cloud_worker.py
 COPY subtitle_standards.py /app/subtitle_standards.py
 COPY utils/ /app/utils/
+COPY workers/__init__.py /app/workers/__init__.py
+COPY workers/pre_segmenter.py /app/workers/pre_segmenter.py
+COPY workers/translation_engine.py /app/workers/translation_engine.py
 
 # Sanity check: fail build if required modules are missing.
-RUN python -c "import importlib; [importlib.import_module(m) for m in ['config', 'subtitle_standards', 'gcp_auth', 'gcs_jobs', 'utils.circuit_breaker', 'omega_cloud_worker']]; print('Cloud worker import check: OK')"
+RUN python -c "import importlib; [importlib.import_module(m) for m in ['config', 'subtitle_standards', 'gcp_auth', 'gcs_jobs', 'utils.circuit_breaker', 'workers.pre_segmenter', 'workers.translation_engine', 'omega_cloud_worker']]; print('Cloud worker import check: OK')"
 
 ENV PYTHONUNBUFFERED=1
 

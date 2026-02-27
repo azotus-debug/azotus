@@ -3,6 +3,7 @@ import os
 import sys
 import json
 import logging
+import traceback
 import shutil
 import subprocess
 import secrets
@@ -26,9 +27,26 @@ from lock_manager import ProcessLock
 from concurrent.futures import ThreadPoolExecutor
 from google.cloud import storage
 from job_logs import job_log_context
-from transition_service import execute_transition
+from transition_service import execute_transition, apply_transition
 from state_machine import legacy_to_new, can_transition
 from artifact_lock import job_artifact_lock
+from workers.text_sanitizer import detect_likely_t_escape_corruption
+
+# --- Circuit Breaker for DB Errors ---
+_DB_ERROR_PATTERNS = ("connection", "timeout", "operational", "closed", "reset by peer")
+_MANAGER_DB_FAILURE_THRESHOLD = int(os.environ.get("OMEGA_MANAGER_DB_FAILURE_THRESHOLD", "3"))
+_MANAGER_DB_COOLDOWN_SECONDS = float(os.environ.get("OMEGA_MANAGER_DB_COOLDOWN_SECONDS", "300"))
+
+
+def _is_db_error(exc: Exception) -> bool:
+    msg = str(exc or "").lower()
+    if any(p in msg for p in _DB_ERROR_PATTERNS):
+        return True
+    cause = getattr(exc, "__cause__", None) or getattr(exc, "__context__", None)
+    if cause and cause is not exc:
+        return _is_db_error(cause)
+    return False
+
 
 # Import Workers
 from workers import transcriber, editor, finalizer, publisher
@@ -58,7 +76,7 @@ failure_counts = {}
 import threading
 _task_lock = threading.Lock()
 
-MAX_TASK_FAILURES = 5
+MAX_TASK_FAILURES = 3  # Reduced from 5 to limit runaway costs (was allowing 5 full restarts = 5x cost)
 
 # --- Thread-safe helpers for active_tasks ---
 def _is_task_active(stem: str) -> bool:
@@ -94,10 +112,46 @@ def _safe_float_env(name: str, default: float) -> float:
     except Exception:
         return default
 
+
+def _load_approved_segments(approved_path: Path) -> list:
+    with open(approved_path, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if isinstance(payload, dict):
+        segments = payload.get("segments", [])
+        return segments if isinstance(segments, list) else []
+    return payload if isinstance(payload, list) else []
+
+
+def _ensure_text_integrity(
+    *,
+    stem: str,
+    approved_path: Path,
+    target_language: str,
+) -> dict:
+    if not approved_path.exists():
+        return {"enabled": False, "suspicious": False, "reason": "approved-missing"}
+
+    segments = _load_approved_segments(approved_path)
+    report = detect_likely_t_escape_corruption(
+        segments,
+        target_language=target_language,
+    )
+    if report.get("suspicious"):
+        text_stats = report.get("text", {})
+        t_ratio = float(text_stats.get("t_ratio") or 0.0)
+        letters = int(text_stats.get("letter_count") or 0)
+        reason = report.get("reason") or "likely tab-escape corruption"
+        raise RuntimeError(
+            f"Text integrity gate failed for {stem}: {reason} "
+            f"(t_ratio={t_ratio:.6f}, letters={letters})."
+        )
+    return report
+
 INGEST_STALL_SECONDS = _safe_float_env("OMEGA_INGEST_STALL_SECONDS", 1800.0)
 INGEST_STABILITY_CHECKS = int(os.environ.get("OMEGA_INGEST_STABILITY_CHECKS", "3") or 3)
 INGEST_STABILITY_DELAY = _safe_float_env("OMEGA_INGEST_STABILITY_DELAY", 1.0)
 INGEST_MIN_AGE_SECONDS = _safe_float_env("OMEGA_INGEST_MIN_AGE", 3.0)
+INGEST_RETRY_RECOVERY_WINDOW_SECONDS = _safe_float_env("OMEGA_INGEST_RETRY_RECOVERY_WINDOW_SECONDS", 21600.0)
 RESTART_FLAG = config.BASE_DIR / "heartbeats" / "omega_manager.restart"
 RESTART_FORCE_FLAG = config.BASE_DIR / "heartbeats" / "omega_manager.restart.force"
 
@@ -105,13 +159,14 @@ STAGE_STALL_THRESHOLDS = {
     "TRANSCRIBED": _safe_float_env("OMEGA_STALL_TRANSCRIBED", 7200.0),
     "TRANSLATING": _safe_float_env("OMEGA_STALL_TRANSLATING", 5400.0),
     "TRANSLATING_CLOUD_SUBMITTED": _safe_float_env("OMEGA_STALL_CLOUD_SUBMITTED", 5400.0),
-    "CLOUD_TRANSLATING": _safe_float_env("OMEGA_STALL_CLOUD", 5400.0),
+    "CLOUD_TRANSLATING": _safe_float_env("OMEGA_STALL_CLOUD", 1800.0),
     "CLOUD_REVIEWING": _safe_float_env("OMEGA_STALL_CLOUD_REVIEWING", 7200.0),
     "REVIEWED": _safe_float_env("OMEGA_STALL_REVIEWED", 10800.0),
     "REVIEWING": _safe_float_env("OMEGA_STALL_REVIEWING", 10800.0),
     "FINALIZING": _safe_float_env("OMEGA_STALL_FINALIZING", 10800.0),
     "BURNING": _safe_float_env("OMEGA_STALL_BURNING", 21600.0),
 }
+CLOUD_STALL_RETRY_COOLDOWN_SECONDS = _safe_float_env("OMEGA_CLOUD_STALL_RETRY_COOLDOWN_SECONDS", 300.0)
 
 
 def _cloud_pipeline_enabled() -> bool:
@@ -456,10 +511,10 @@ def _build_review_payload(
     segments = data.get("segments", data) if isinstance(data, dict) else data
     payload_segments = []
     for seg in segments or []:
-        try:
-            seg_id = int(seg.get("id"))
-        except Exception:
+        seg_id = seg.get("id")
+        if seg_id is None:
             continue
+        seg_id = str(seg_id)
         payload_segments.append(
             {
                 "id": seg_id,
@@ -496,15 +551,15 @@ def _apply_remote_corrections(*, approved_path: Path, corrections: list[dict]) -
     if not isinstance(segments, list):
         return 0, 0
 
-    correction_map: dict[int, str] = {}
+    correction_map: dict[str, str] = {}
     comment_count = 0
     for item in corrections:
         if not isinstance(item, dict):
             continue
-        try:
-            seg_id = int(item.get("id"))
-        except Exception:
+        seg_id = item.get("id")
+        if seg_id is None:
             continue
+        seg_id = str(seg_id)
         text = item.get("text")
         if isinstance(text, str) and text.strip():
             correction_map[seg_id] = text.strip()
@@ -514,10 +569,10 @@ def _apply_remote_corrections(*, approved_path: Path, corrections: list[dict]) -
 
     applied = 0
     for seg in segments:
-        try:
-            seg_id = int(seg.get("id"))
-        except Exception:
+        seg_id = seg.get("id")
+        if seg_id is None:
             continue
+        seg_id = str(seg_id)
         if seg_id in correction_map:
             seg["text"] = correction_map[seg_id]
             applied += 1
@@ -584,6 +639,7 @@ def task_wrapper(stem, task_name, func, *args, **kwargs):
             is_transient = _is_transient_error(e)
             error_str = str(e)
             short_error = error_str if len(error_str) <= 180 else error_str[:177] + "..."
+            traceback_str = traceback.format_exc()
 
             if is_transient:
                 # Transient error: Log at warning level, minimal backoff, don't count toward failure limit
@@ -599,7 +655,12 @@ def task_wrapper(stem, task_name, func, *args, **kwargs):
                     omega_db.update_job_via_track(
                         stem,
                         status=f"Transient error (auto-retry in {backoff}s): {short_error}",
-                        meta={"last_error": short_error, "error_type": "transient", "failed_at": datetime.now().isoformat()},
+                        meta={
+                            "last_error": short_error,
+                            "error_type": "transient",
+                            "failed_at": datetime.now().isoformat(),
+                            "traceback": traceback_str,
+                        },
                     )
                 except Exception as db_err:
                     logger.warning(f"DB update failed in error handler for {stem}: {db_err}")
@@ -615,11 +676,10 @@ def task_wrapper(stem, task_name, func, *args, **kwargs):
 
                 if count > MAX_TASK_FAILURES:
                     logger.error(f"🛑 Job {stem} failed {int(count)} times. Halting until manual intervention.")
-                    # Record transition for audit
                     try:
-                        current_job = omega_db.get_job_by_stem(stem)
+                        current_job = omega_db.get_job_via_track(stem)
                         current_stage = (current_job.get("stage") or "UNKNOWN") if current_job else "UNKNOWN"
-                        execute_transition(
+                        apply_transition(
                             job_id=stem,
                             job_stem=stem,
                             from_stage=current_stage,
@@ -627,13 +687,6 @@ def task_wrapper(stem, task_name, func, *args, **kwargs):
                             worker_id="omega_manager",
                             reason=f"Permanent failure after {int(count)} retries: {short_error}",
                             skip_validation=_requires_validation_bypass(current_stage, "DEAD"),
-                        )
-                    except Exception as te:
-                        logger.warning(f"Transition audit failed: {te}")
-                    try:
-                        omega_db.update_job_via_track(
-                            stem,
-                            stage="DEAD",
                             status=f"DEAD: {short_error}",
                             progress=0,
                             meta={
@@ -642,21 +695,35 @@ def task_wrapper(stem, task_name, func, *args, **kwargs):
                                 "last_error": short_error,
                                 "error_type": "permanent",
                                 "failed_at": datetime.now().isoformat(),
+                                "traceback": traceback_str,
                             },
                         )
-                    except Exception as db_err:
-                        logger.warning(f"DB update failed in error handler for {stem}: {db_err}")
+                    except Exception as te:
+                        logger.warning(f"Transition to DEAD failed for {stem}: {te}")
                 else:
                     logger.warning(f"⚠️ Job {stem} failed {int(count)} times. Backing off for {backoff}s...")
                     try:
-                        omega_db.update_job_via_track(
-                            stem,
+                        fail_job = omega_db.get_job_via_track(stem)
+                        fail_stage = (fail_job.get("stage") or "UNKNOWN") if fail_job else "UNKNOWN"
+                        apply_transition(
+                            job_id=stem,
+                            job_stem=stem,
+                            from_stage=fail_stage,
+                            to_stage="FAILED",
+                            worker_id="omega_manager",
+                            reason=f"Error (Retry {int(count)}/{MAX_TASK_FAILURES}): {short_error}",
+                            skip_validation=_requires_validation_bypass(fail_stage, "FAILED"),
                             status=f"Error (Retry {int(count)}/{MAX_TASK_FAILURES}): {short_error}",
                             progress=0,
-                            meta={"last_error": short_error, "error_type": "permanent", "failed_at": datetime.now().isoformat()},
+                            meta={
+                                "last_error": short_error,
+                                "error_type": "permanent",
+                                "failed_at": datetime.now().isoformat(),
+                                "traceback": traceback_str,
+                            },
                         )
                     except Exception as db_err:
-                        logger.warning(f"DB update failed in error handler for {stem}: {db_err}")
+                        logger.warning(f"Transition to FAILED failed for {stem}: {db_err}")
 
         finally:
             logger.info(f"🏁 Finished Async Task: {task_name} for {stem}")
@@ -669,22 +736,22 @@ def ingest_new_files(executor):
     EXTENSIONS = {".mp3", ".wav", ".mp4", ".m4a", ".mov", ".mkv", ".mpg", ".mpeg", ".moc", ".mxf"}
     
     WATCH_MAP = {
-        # Root Inbox (Default to Auto/Classic)
-        config.INBOX_DIR: ("AUTO", "Classic"),
+        # Root Inbox (Default to Auto/RUV_BOX)
+        config.INBOX_DIR: ("AUTO", "RUV_BOX"),
         # Auto Pilot
-        config.INBOX_DIR / "01_AUTO_PILOT" / "Classic": ("AUTO", "Classic"),
+        config.INBOX_DIR / "01_AUTO_PILOT" / "Classic": ("AUTO", "RUV_BOX"),
         config.INBOX_DIR / "01_AUTO_PILOT" / "Modern_Look": ("AUTO", "Modern"),
         config.INBOX_DIR / "01_AUTO_PILOT" / "Apple_TV": ("AUTO", "Apple"),
         # Manual Review
-        config.INBOX_DIR / "02_HUMAN_REVIEW" / "Classic": ("REVIEW", "Classic"),
+        config.INBOX_DIR / "02_HUMAN_REVIEW" / "Classic": ("REVIEW", "RUV_BOX"),
         config.INBOX_DIR / "02_HUMAN_REVIEW" / "Modern_Look": ("REVIEW", "Modern"),
         config.INBOX_DIR / "02_HUMAN_REVIEW" / "Apple_TV": ("REVIEW", "Apple"),
         # Remote Review (email reviewer)
-        config.INBOX_DIR / "03_REMOTE_REVIEW" / "Classic": ("REMOTE_REVIEW", "Classic"),
+        config.INBOX_DIR / "03_REMOTE_REVIEW" / "Classic": ("REMOTE_REVIEW", "RUV_BOX"),
         config.INBOX_DIR / "03_REMOTE_REVIEW" / "Modern_Look": ("REMOTE_REVIEW", "Modern"),
         config.INBOX_DIR / "03_REMOTE_REVIEW" / "Apple_TV": ("REMOTE_REVIEW", "Apple"),
         # STAGED MODE: Transcribe only, wait for user to configure
-        config.STAGE_DIR: ("STAGED", "Classic"),
+        config.STAGE_DIR: ("STAGED", "RUV_BOX"),
     }
     
     for folder, (mode, style) in WATCH_MAP.items():
@@ -795,7 +862,7 @@ def ingest_new_files(executor):
                     continue
                 
                 # Submit with DROPZONE mode
-                executor.submit(task_wrapper, stem, "Ingest", _run_ingest, file_path, "DROPZONE", "Classic", recipe_meta)
+                executor.submit(task_wrapper, stem, "Ingest", _run_ingest, file_path, "DROPZONE", "RUV_BOX", recipe_meta)
 
 def _detect_client(filename: str) -> str:
     """Detect client from filename using CLIENT_PATTERNS from config."""
@@ -1087,7 +1154,61 @@ def _run_ingest(file_path, mode, style, sidecar_meta=None):
 
             # Run transcription (shared for all modes)
             skeleton_path = transcriber.transcribe(audio_path, job_id=job_id)
-            
+
+            # --- 3.5 WORSHIP / MUSIC DETECTION (pre-translation filtering) ---
+            if config.OMEGA_WORSHIP_DETECTION_ENABLED and skeleton_path and skeleton_path.exists():
+                try:
+                    from workers.audio_classifier import (
+                        mark_music_segments,
+                        detect_worship_by_repetition,
+                        is_available as ac_available,
+                    )
+
+                    with open(skeleton_path, "r") as _f:
+                        skel_data = json.load(_f)
+
+                    skel_segments = skel_data if isinstance(skel_data, list) else skel_data.get("segments", [])
+                    worship_stats = {"audio_marked": 0, "text_marked": 0}
+
+                    # Layer 1: CNN-based audio classification (instrumental music, melodic singing)
+                    if ac_available() and audio_path and audio_path.exists():
+                        logger.info("🎵 Layer 1: Running audio classification on %d segments...", len(skel_segments))
+                        skel_segments, audio_marked = mark_music_segments(skel_segments, audio_path)
+                        worship_stats["audio_marked"] = audio_marked
+                        if audio_marked:
+                            logger.info("🎵 Layer 1 complete: %d segments marked as music", audio_marked)
+
+                    # Layer 2: Text repetition detection (sung lyrics with clear words)
+                    logger.info("🎵 Layer 2: Running text repetition analysis on %d segments...", len(skel_segments))
+                    skel_segments, text_marked = detect_worship_by_repetition(
+                        skel_segments,
+                        window_size=config.OMEGA_WORSHIP_REPETITION_WINDOW,
+                        min_occurrences=config.OMEGA_WORSHIP_REPETITION_THRESHOLD,
+                        min_cluster_size=config.OMEGA_WORSHIP_MIN_CLUSTER_SIZE,
+                    )
+                    worship_stats["text_marked"] = text_marked
+
+                    total_marked = sum(1 for s in skel_segments if s.get("is_worship") or s.get("is_music"))
+                    if total_marked > 0:
+                        logger.info(
+                            "🎵 TOTAL: %d/%d segments marked for worship filtering (%d audio, %d text)",
+                            total_marked, len(skel_segments), worship_stats["audio_marked"], worship_stats["text_marked"],
+                        )
+                        # Write back modified skeleton
+                        if isinstance(skel_data, list):
+                            skel_data = skel_segments
+                        else:
+                            skel_data["segments"] = skel_segments
+                            skel_data["worship_detection"] = worship_stats
+                        with open(skeleton_path, "w") as _f:
+                            json.dump(skel_data, _f, ensure_ascii=False, indent=2)
+                        logger.info("🎵 Updated skeleton with worship flags: %s", skeleton_path.name)
+                    else:
+                        logger.info("🎵 No worship segments detected — all content will be subtitled")
+
+                except Exception as e:
+                    logger.warning("⚠️ Worship detection failed (non-fatal): %s", e)
+
             # --- 4. HANDLE STAGED vs NORMAL/DROPZONE FLOW ---
             if is_staged:
                 # STAGED MODE: Stop here, don't upload to cloud or create tracks
@@ -1162,9 +1283,8 @@ def _run_ingest(file_path, mode, style, sidecar_meta=None):
             # --- 6. FINALIZE INGEST ---
             # Update all tracks to TRANSCRIBED
             for track_id, lang_code, lang_job_id in track_ids:
-                # Record transition for audit
                 try:
-                    execute_transition(
+                    apply_transition(
                         job_id=lang_job_id,
                         job_stem=original_stem,
                         from_stage="INGEST",
@@ -1172,16 +1292,12 @@ def _run_ingest(file_path, mode, style, sidecar_meta=None):
                         processing_step="transcribe",
                         worker_id="omega_manager",
                         reason="Transcription complete",
+                        status="Ready for Translation",
+                        progress=30.0,
+                        meta={"program_id": program_id, "track_id": track_id, "cloud_job_id": lang_job_id},
                     )
                 except Exception as e:
-                    logger.warning(f"Transition audit failed for {lang_job_id}: {e}")
-                omega_db.update_job_via_track(
-                    lang_job_id,
-                    stage="TRANSCRIBED",
-                    status="Ready for Translation",
-                    progress=30.0,
-                    meta={"program_id": program_id, "track_id": track_id, "cloud_job_id": lang_job_id}
-                )
+                    logger.warning(f"Transition INGEST->TRANSCRIBED failed for {lang_job_id}: {e}")
 
         except Exception as e:
             raise e
@@ -1196,11 +1312,88 @@ def _run_ingest_recovery(stem: str, video_path: Path):
         # Re-run transcriber
         # input: video_path (in Vault)
         # job_id: stem (Critical for file naming)
-        transcriber.run(video_path, job_id=stem)
+        skeleton_path = transcriber.run(video_path, job_id=stem)
 
-        # Record transition for audit
+        # Recovery path must also restore cloud input artifacts.
+        # Without this, cloud translation can be triggered with no job payload.
+        if _cloud_pipeline_enabled():
+            bucket_name = config.OMEGA_JOBS_BUCKET
+            prefix = config.OMEGA_JOBS_PREFIX
+            if not bucket_name:
+                raise RuntimeError("Cloud pipeline enabled but OMEGA_JOBS_BUCKET is empty")
+
+            job = omega_db.get_job_via_track(stem) or {}
+            track = omega_db.get_track_by_job(stem) or {}
+            job_meta = _job_meta(job)
+            target_language = (
+                str(track.get("language_code") or job.get("target_language") or "is")
+                .strip()
+                .lower()
+                or "is"
+            )
+            trace_id = str(job_meta.get("trace_id") or stem).strip() or stem
+            original_stem = str(job_meta.get("original_stem") or video_path.stem)
+            station_id = str(job_meta.get("station_id") or config.OMEGA_STATION_ID or "").strip()
+            program_profile = str(job.get("program_profile") or job_meta.get("program_profile") or "standard").strip() or "standard"
+            glossary_terms = job_meta.get("glossary_terms")
+            if not isinstance(glossary_terms, list):
+                glossary_terms = []
+
+            audio_path = config.VAULT_DIR / "Audio" / f"{stem}.wav"
+            if not skeleton_path or not Path(skeleton_path).exists():
+                raise RuntimeError(f"Missing skeleton for recovery upload: {stem}")
+            if not audio_path.exists():
+                raise RuntimeError(f"Missing audio for recovery upload: {audio_path}")
+
+            logger.info("☁️ Recovery upload: %s (%s)", stem, target_language)
+            ensure_google_application_credentials()
+            storage_client = storage.Client()
+            paths = GcsJobPaths(bucket=bucket_name, prefix=prefix, job_id=stem)
+
+            with open(skeleton_path, "r", encoding="utf-8") as handle:
+                skeleton_data = json.load(handle)
+            upload_json(
+                storage_client,
+                bucket=bucket_name,
+                blob_name=paths.skeleton_blob,
+                payload=skeleton_data,
+            )
+
+            audio_blob_name = paths.audio_blob()
+            audio_blob = storage_client.bucket(bucket_name).blob(audio_blob_name)
+            if not audio_blob.exists():
+                audio_blob.upload_from_filename(str(audio_path), content_type="audio/wav")
+
+            job_payload = {
+                "id": stem,
+                "trace_id": trace_id,
+                "file_stem": original_stem,
+                "target_language": target_language,
+                "program_profile": program_profile,
+                "station_id": station_id,
+                "glossary_terms": glossary_terms,
+                "audio_file": audio_path.name,
+                "audio_gcs_uri": f"gs://{bucket_name}/{audio_blob_name}",
+                "meta": {**job_meta, "target_language": target_language},
+                "created_at": publisher.iso_now(),
+            }
+            upload_json(
+                storage_client,
+                bucket=bucket_name,
+                blob_name=paths.job_blob,
+                payload=job_payload,
+            )
+            omega_db.update_job_via_track(
+                stem,
+                meta={
+                    "uploaded_at": publisher.iso_now(),
+                    "trace_id": trace_id,
+                    "cloud_recovery_upload_at": publisher.iso_now(),
+                },
+            )
+
         try:
-            execute_transition(
+            apply_transition(
                 job_id=stem,
                 job_stem=stem,
                 from_stage="INGEST",
@@ -1208,15 +1401,16 @@ def _run_ingest_recovery(stem: str, video_path: Path):
                 processing_step="transcribe",
                 worker_id="omega_manager",
                 reason="Transcription recovery complete",
+                status="Ready for Translation",
+                progress=30.0,
+                meta={"retry_force_ingest_recovery": False, "retry_requested_at": ""},
             )
         except Exception as e:
-            logger.warning(f"Transition audit failed for {stem}: {e}")
-        omega_db.update_job_via_track(stem, stage="TRANSCRIBED", status="Ready for Translation", progress=30.0)
+            logger.warning(f"Transition INGEST->TRANSCRIBED failed for {stem}: {e}")
     except Exception as e:
         logger.error(f"❌ Recovery failed for {stem}: {e}")
-        # Record transition for audit
         try:
-            execute_transition(
+            apply_transition(
                 job_id=stem,
                 job_stem=stem,
                 from_stage="INGEST",
@@ -1224,10 +1418,11 @@ def _run_ingest_recovery(stem: str, video_path: Path):
                 worker_id="omega_manager",
                 reason=f"Ingest recovery failed: {str(e)}",
                 skip_validation=_requires_validation_bypass("INGEST", "FAILED"),
+                status=f"Recovery Failed: {str(e)}",
+                progress=0.0,
             )
         except Exception as te:
-            logger.warning(f"Transition audit failed: {te}")
-        omega_db.update_job_via_track(stem, stage="FAILED", status=f"Recovery Failed: {str(e)}", progress=0.0)
+            logger.warning(f"Transition INGEST->FAILED failed for {stem}: {te}")
         raise e
 
 # =========================================================================
@@ -1367,12 +1562,14 @@ def _sync_cloud_approved_idempotent(stem: str, storage_client, bucket_name: str,
                         raw_segments, target_language=target_language
                     )
                     # Update the approved.json with normalized segments
+                    # Preserve word-level timing data for BBC/Netflix speech anchoring in finalizer
                     approved_payload["segments"] = [
                         {
                             "start": seg["start"],
                             "end": seg["end"],
                             "text": seg["text"],
                             "speaker": seg.get("speaker"),
+                            **({"words": seg["words"]} if "words" in seg else {}),
                         }
                         for seg in normalized_segments
                     ]
@@ -1384,10 +1581,16 @@ def _sync_cloud_approved_idempotent(stem: str, storage_client, bucket_name: str,
                     logger.info(f"✅ Saved normalized segments ({len(raw_segments)} → {len(normalized_segments)})")
 
                 # Update job record via track (Source of Truth)
-                omega_db.update_job_via_track(
-                    stem,
-                    stage='REVIEWED',
-                    status='Awaiting finalization'
+                current_stage = (job.get("stage") or "CLOUD_REVIEWING").upper()
+                apply_transition(
+                    job_id=stem,
+                    job_stem=stem,
+                    from_stage=current_stage,
+                    to_stage="REVIEWED",
+                    worker_id="omega_manager",
+                    reason="Cloud approved.json synced successfully",
+                    skip_validation=_requires_validation_bypass(current_stage, "REVIEWED"),
+                    status='Awaiting finalization',
                 )
 
                 # Update sync state to SYNCED
@@ -1481,37 +1684,33 @@ def reconcile_orphaned_sync_states():
 
 def reconcile_orphaned_deliveries():
     """
-    Background service to detect and fix orphaned deliveries.
-    Run this periodically (e.g., every hour) to catch any sync failures.
+    Background service to detect and reconcile orphaned delivery files.
+    Uses the same deterministic logic as scripts/reconcile_orphan_deliveries.py.
     """
-    from pathlib import Path
-    import omega_db
-
-    delivery_dir = Path(config.DELIVERY_DIR) / "VIDEO"
-
-    if not delivery_dir.exists():
+    try:
+        from scripts.reconcile_orphan_deliveries import reconcile
+    except Exception as e:
+        logger.warning(f"Orphan reconciler import failed: {e}")
         return
 
-    for video_file in delivery_dir.glob("*_SUBBED.mp4"):
-        if _is_hidden_artifact(video_file):
-            continue
-        job_id = video_file.stem.replace("_SUBBED", "")
-        if not job_id or job_id.startswith("."):
-            continue
+    archive_dir = Path(config.DELIVERY_DIR) / "VIDEO" / f"ORPHAN_ARCHIVE_{datetime.now():%Y%m%d}"
+    try:
+        report = reconcile(apply=True, archive_dir=archive_dir, write_manifest=True)
+    except Exception as e:
+        logger.error(f"Orphan reconciliation run failed: {e}")
+        return
 
-        # Check database
-        job = omega_db.get_job_via_track(job_id)
-
-        if not job:
-            logger.warning(f"🔍 ORPHAN DETECTED: {job_id} - file exists but no DB record")
-            # Could auto-create records here or alert admin
-
-        elif job.get('stage') != 'COMPLETED':
-            # logger.warning(f"🔍 INCOMPLETE SYNC: {job_id} - delivered but DB shows {job.get('stage')}")
-            # Check cloud_sync_state for this job
-            sync_state = omega_db.get_sync_state(job_id, 'approved_json')
-            if sync_state and sync_state['state'] != 'SYNCED':
-                logger.info(f"   Sync state: {sync_state['state']} (will retry)")
+    summary = report.get("summary") or {}
+    planned = int(summary.get("planned") or 0)
+    applied = int(summary.get("applied") or 0)
+    by_class = summary.get("by_classification") or {}
+    if planned > 0:
+        logger.warning(
+            "🔄 Orphan reconciliation: planned=%d applied=%d classes=%s",
+            planned,
+            applied,
+            by_class,
+        )
 
 
 # ============================================================================
@@ -1572,7 +1771,7 @@ def _autocorrect_completed(stem: str, job: dict) -> bool:
         if stage_upper not in {"COMPLETED", "DELIVERED"}:
             logger.info(f"✅ Auto-correcting {stem}: output exists at {final_path}")
             try:
-                execute_transition(
+                apply_transition(
                     job_id=stem,
                     job_stem=stem,
                     from_stage=stage_upper,
@@ -1580,16 +1779,12 @@ def _autocorrect_completed(stem: str, job: dict) -> bool:
                     worker_id="self_healer",
                     reason="Self-heal: output file exists",
                     skip_validation=_requires_validation_bypass(stage_upper, "COMPLETED"),
+                    status="Done",
+                    progress=100.0,
+                    meta={"last_error": "", "failed_at": ""},
                 )
             except Exception as e:
-                logger.warning(f"Transition audit failed for {stem}: {e}")
-            omega_db.update_job_via_track(
-                stem,
-                stage="COMPLETED",
-                status="Done",
-                progress=100.0,
-                meta={"last_error": "", "failed_at": ""},
-            )
+                logger.warning(f"Transition to COMPLETED failed for {stem}: {e}")
         # Reconcile orphaned sync states - mark as SYNCED if job is complete
         try:
             sync_state = omega_db.get_sync_state(stem, 'approved_json')
@@ -1608,6 +1803,9 @@ def _self_heal_job(stem: str, job: dict) -> bool:
 
     Returns True if job was auto-corrected, False otherwise.
     """
+    # Neutered: The database is the single source of truth. Relieving the manager of file polling.
+    return False
+
     stage = (job.get("stage") or "").upper()
     meta = _job_meta(job)
 
@@ -1626,29 +1824,39 @@ def _self_heal_job(stem: str, job: dict) -> bool:
     final_path = _final_output_path(job)
 
     # Priority 1: Final video exists → COMPLETED
-    # BUT: Only if the video file is newer than the current burn attempt
-    # This prevents false-positives when old videos exist from previous burns
+    # BUT: Only if the video file is newer than the track's last update.
+    # This prevents stale videos from previous runs hijacking re-runs.
     if final_path and final_path.exists():
         if stage != "COMPLETED":
-            # Check if this is a stale video from a previous burn
-            burn_started_at = meta.get("burn_started_at")
-            if burn_started_at and stage == "BURNING":
-                # Job is currently burning - check if video is from THIS burn
+            # Check video freshness against the appropriate reference time:
+            # - BURNING stage: use burn_started_at (most specific)
+            # - All other stages: use track updated_at (catches reset-without-cleanup)
+            if stage == "BURNING":
+                reference_time_str = meta.get("burn_started_at")
+            else:
+                reference_time_str = job.get("updated_at")
+            if reference_time_str:
                 try:
                     from datetime import datetime
                     video_mtime = datetime.fromtimestamp(final_path.stat().st_mtime)
-                    burn_start = datetime.fromisoformat(burn_started_at.replace("Z", "+00:00").replace("+00:00", ""))
-                    if video_mtime < burn_start:
-                        # Video is OLDER than current burn - this is a stale file, skip
-                        logger.debug(f"🔧 Self-heal {stem}: video exists but is stale (mtime={video_mtime}, burn_start={burn_start})")
+                    ref_str = str(reference_time_str)
+                    # Handle various ISO format variants
+                    ref_str = ref_str.replace("Z", "+00:00")
+                    if "+" not in ref_str and ref_str.count(":") < 3:
+                        ref_str += "+00:00"
+                    reference_time = datetime.fromisoformat(ref_str.replace("+00:00", "")).replace(tzinfo=None)
+                    video_mtime = video_mtime.replace(tzinfo=None)
+                    if video_mtime < reference_time:
+                        # Video is OLDER than track update - stale from previous run
+                        logger.info(f"🔧 Self-heal {stem}: video exists but is stale (video={video_mtime}, track_updated={reference_time})")
                         return False
                 except Exception as e:
                     logger.warning(f"🔧 Self-heal {stem}: Could not check video freshness: {e}")
-                    # If we can't check, don't auto-complete a BURNING job
-                    return False
+                    if stage == "BURNING":
+                        return False  # Don't auto-complete a BURNING job if we can't verify
             logger.info(f"🔧 Self-heal {stem}: video exists → COMPLETED")
             try:
-                execute_transition(
+                apply_transition(
                     job_id=stem,
                     job_stem=stem,
                     from_stage=stage,
@@ -1656,13 +1864,11 @@ def _self_heal_job(stem: str, job: dict) -> bool:
                     worker_id="self_healer",
                     reason="Self-heal: video file exists",
                     skip_validation=_requires_validation_bypass(stage, "COMPLETED"),
+                    status="Done",
+                    progress=100.0,
                 )
             except Exception as e:
-                logger.warning(f"Transition audit failed for {stem}: {e}")
-            try:
-                omega_db.update_job_via_track(stem, stage="COMPLETED", status="Done", progress=100.0)
-            except Exception as e:
-                logger.warning(f"🔧 Self-heal DB update failed for {stem}: {e}")
+                logger.warning(f"🔧 Self-heal transition failed for {stem}: {e}")
                 return False
             return True
 
@@ -1670,7 +1876,7 @@ def _self_heal_job(stem: str, job: dict) -> bool:
     if srt_path.exists() and stage not in {"FINALIZED", "BURNING", "COMPLETED"}:
         logger.info(f"🔧 Self-heal {stem}: SRT exists → FINALIZED")
         try:
-            execute_transition(
+            apply_transition(
                 job_id=stem,
                 job_stem=stem,
                 from_stage=stage,
@@ -1678,13 +1884,11 @@ def _self_heal_job(stem: str, job: dict) -> bool:
                 worker_id="self_healer",
                 reason="Self-heal: SRT file exists",
                 skip_validation=_requires_validation_bypass(stage, "FINALIZED"),
+                status="Ready to burn",
+                progress=85.0,
             )
         except Exception as e:
-            logger.warning(f"Transition audit failed for {stem}: {e}")
-        try:
-            omega_db.update_job_via_track(stem, stage="FINALIZED", status="Ready to burn", progress=85.0)
-        except Exception as e:
-            logger.warning(f"🔧 Self-heal DB update failed for {stem}: {e}")
+            logger.warning(f"🔧 Self-heal transition failed for {stem}: {e}")
             return False
         return True
 
@@ -1692,7 +1896,7 @@ def _self_heal_job(stem: str, job: dict) -> bool:
     if approved_path.exists() and stage not in {"REVIEWED", "FINALIZING", "FINALIZED", "BURNING", "COMPLETED"}:
         logger.info(f"🔧 Self-heal {stem}: approved.json exists → REVIEWED")
         try:
-            execute_transition(
+            apply_transition(
                 job_id=stem,
                 job_stem=stem,
                 from_stage=stage,
@@ -1700,13 +1904,11 @@ def _self_heal_job(stem: str, job: dict) -> bool:
                 worker_id="self_healer",
                 reason="Self-heal: approved.json exists",
                 skip_validation=_requires_validation_bypass(stage, "REVIEWED"),
+                status="Ready to finalize",
+                progress=70.0,
             )
         except Exception as e:
-            logger.warning(f"Transition audit failed for {stem}: {e}")
-        try:
-            omega_db.update_job_via_track(stem, stage="REVIEWED", status="Ready to finalize", progress=70.0)
-        except Exception as e:
-            logger.warning(f"🔧 Self-heal DB update failed for {stem}: {e}")
+            logger.warning(f"🔧 Self-heal transition failed for {stem}: {e}")
             return False
         return True
 
@@ -1714,7 +1916,7 @@ def _self_heal_job(stem: str, job: dict) -> bool:
     if skeleton_path and stage in {"QUEUED", "INGEST", ""}:
         logger.info(f"🔧 Self-heal {stem}: skeleton exists → TRANSCRIBED")
         try:
-            execute_transition(
+            apply_transition(
                 job_id=stem,
                 job_stem=stem,
                 from_stage=stage,
@@ -1722,13 +1924,11 @@ def _self_heal_job(stem: str, job: dict) -> bool:
                 worker_id="self_healer",
                 reason="Self-heal: skeleton exists",
                 skip_validation=_requires_validation_bypass(stage, "TRANSCRIBED"),
+                status="Ready for translation",
+                progress=30.0,
             )
         except Exception as e:
-            logger.warning(f"Transition audit failed for {stem}: {e}")
-        try:
-            omega_db.update_job_via_track(stem, stage="TRANSCRIBED", status="Ready for translation", progress=30.0)
-        except Exception as e:
-            logger.warning(f"🔧 Self-heal DB update failed for {stem}: {e}")
+            logger.warning(f"🔧 Self-heal transition failed for {stem}: {e}")
             return False
         return True
 
@@ -1737,7 +1937,7 @@ def _self_heal_job(stem: str, job: dict) -> bool:
         if srt_path.exists():
             logger.info(f"🔧 Self-heal {stem}: DEAD but SRT exists → FINALIZED")
             try:
-                execute_transition(
+                apply_transition(
                     job_id=stem,
                     job_stem=stem,
                     from_stage=stage,
@@ -1745,20 +1945,18 @@ def _self_heal_job(stem: str, job: dict) -> bool:
                     worker_id="self_healer",
                     reason="Self-heal: DEAD but SRT exists",
                     skip_validation=_requires_validation_bypass(stage, "FINALIZED"),
+                    status="Recovered from DEAD",
+                    progress=85.0,
+                    meta={**meta, "halted": False, "recovered_from_dead": True},
                 )
             except Exception as e:
-                logger.warning(f"Transition audit failed for {stem}: {e}")
-            try:
-                omega_db.update_job_via_track(stem, stage="FINALIZED", status="Recovered from DEAD", progress=85.0,
-                    meta={**meta, "halted": False, "recovered_from_dead": True})
-            except Exception as e:
-                logger.warning(f"🔧 Self-heal DB update failed for {stem}: {e}")
+                logger.warning(f"🔧 Self-heal transition failed for {stem}: {e}")
                 return False
             return True
         elif approved_path.exists():
             logger.info(f"🔧 Self-heal {stem}: DEAD but approved exists → REVIEWED")
             try:
-                execute_transition(
+                apply_transition(
                     job_id=stem,
                     job_stem=stem,
                     from_stage=stage,
@@ -1766,20 +1964,18 @@ def _self_heal_job(stem: str, job: dict) -> bool:
                     worker_id="self_healer",
                     reason="Self-heal: DEAD but approved.json exists",
                     skip_validation=_requires_validation_bypass(stage, "REVIEWED"),
+                    status="Recovered from DEAD",
+                    progress=70.0,
+                    meta={**meta, "halted": False, "recovered_from_dead": True},
                 )
             except Exception as e:
-                logger.warning(f"Transition audit failed for {stem}: {e}")
-            try:
-                omega_db.update_job_via_track(stem, stage="REVIEWED", status="Recovered from DEAD", progress=70.0,
-                    meta={**meta, "halted": False, "recovered_from_dead": True})
-            except Exception as e:
-                logger.warning(f"🔧 Self-heal DB update failed for {stem}: {e}")
+                logger.warning(f"🔧 Self-heal transition failed for {stem}: {e}")
                 return False
             return True
         elif skeleton_path:
             logger.info(f"🔧 Self-heal {stem}: DEAD but skeleton exists → TRANSCRIBED")
             try:
-                execute_transition(
+                apply_transition(
                     job_id=stem,
                     job_stem=stem,
                     from_stage=stage,
@@ -1787,14 +1983,12 @@ def _self_heal_job(stem: str, job: dict) -> bool:
                     worker_id="self_healer",
                     reason="Self-heal: DEAD but skeleton exists",
                     skip_validation=_requires_validation_bypass(stage, "TRANSCRIBED"),
+                    status="Recovered from DEAD",
+                    progress=30.0,
+                    meta={**meta, "halted": False, "recovered_from_dead": True},
                 )
             except Exception as e:
-                logger.warning(f"Transition audit failed for {stem}: {e}")
-            try:
-                omega_db.update_job_via_track(stem, stage="TRANSCRIBED", status="Recovered from DEAD", progress=30.0,
-                    meta={**meta, "halted": False, "recovered_from_dead": True})
-            except Exception as e:
-                logger.warning(f"🔧 Self-heal DB update failed for {stem}: {e}")
+                logger.warning(f"🔧 Self-heal transition failed for {stem}: {e}")
                 return False
             return True
 
@@ -1864,11 +2058,13 @@ def process_jobs(executor):
             if elapsed < threshold:
                 continue
 
+            cloud_stages = {"TRANSLATING_CLOUD_SUBMITTED", "CLOUD_TRANSLATING", "CLOUD_REVIEWING"}
+            is_cloud_stage = stage in cloud_stages
+
             stall_count = int(meta.get("stall_restart_count") or 0)
-            if stall_count >= MAX_TASK_FAILURES:
-                # Record transition for audit
+            if stall_count >= MAX_TASK_FAILURES and not is_cloud_stage:
                 try:
-                    execute_transition(
+                    apply_transition(
                         job_id=stem,
                         job_stem=stem,
                         from_stage=stage,
@@ -1876,50 +2072,103 @@ def process_jobs(executor):
                         worker_id="omega_manager",
                         reason=f"Stall timeout in {stage} after {stall_count} restart attempts",
                         skip_validation=_requires_validation_bypass(stage, "DEAD"),
+                        status=f"DEAD: stalled in {stage}",
+                        progress=0,
+                        meta={
+                            "halted": True,
+                            "halted_at": datetime.now().isoformat(),
+                            "halt_reason": f"stalled in {stage}",
+                            "stall_detected_at": datetime.now().isoformat(),
+                        },
                     )
                 except Exception as te:
-                    logger.warning(f"Transition audit failed: {te}")
-                omega_db.update_job_via_track(
-                    stem,
-                    stage="DEAD",
-                    status=f"DEAD: stalled in {stage}",
-                    progress=0,
-                    meta={
-                        "halted": True,
-                        "halted_at": datetime.now().isoformat(),
-                        "halt_reason": f"stalled in {stage}",
-                        "stall_detected_at": datetime.now().isoformat(),
-                    },
-                )
+                    logger.warning(f"Transition to DEAD failed for {stem}: {te}")
                 continue
 
-            if stage in {"TRANSLATING_CLOUD_SUBMITTED", "CLOUD_TRANSLATING", "CLOUD_REVIEWING"}:
+            if is_cloud_stage:
+                # GCS progress check: if cloud worker recently updated progress, skip stall action
+                gcs_still_active = False
                 try:
-                    execute_transition(
+                    cloud_job_id = meta.get("cloud_job_id") or meta.get("gcs_job_id")
+                    if cloud_job_id:
+                        _bucket = str(meta.get("cloud_bucket") or config.OMEGA_JOBS_BUCKET).strip()
+                        _prefix = str(meta.get("cloud_prefix") or config.OMEGA_JOBS_PREFIX).strip()
+                        _paths = GcsJobPaths(bucket=_bucket, prefix=_prefix, job_id=str(cloud_job_id))
+                        _sc = storage.Client()
+                        _bucket_obj = _sc.bucket(_bucket)
+                        for check_blob_name in [_paths.progress_json(), f"{_prefix}/{cloud_job_id}/translation_checkpoint.json"]:
+                            try:
+                                blob_obj = _bucket_obj.get_blob(check_blob_name)
+                                if blob_obj and blob_obj.updated:
+                                    blob_age = (datetime.utcnow() - blob_obj.updated.replace(tzinfo=None)).total_seconds()
+                                    if blob_age < 300:  # Updated within 5 minutes
+                                        logger.info(f"⏳ Cloud job {stem} still active (GCS blob updated {blob_age:.0f}s ago). Skipping stall action.")
+                                        gcs_still_active = True
+                                        break
+                            except Exception:
+                                pass
+                except Exception as gcs_exc:
+                    logger.debug(f"GCS progress check failed for {stem}: {gcs_exc}")
+                if gcs_still_active:
+                    continue
+
+                # Soft stall → hard stall: first detection = warning, second = action
+                soft_stall_at = _parse_iso(meta.get("soft_stall_at"))
+                if not soft_stall_at:
+                    logger.warning(f"⚠️ Soft stall detected for {stem} in {stage} ({elapsed:.0f}s). Will re-check next cycle.")
+                    omega_db.update_job_via_track(
+                        stem,
+                        status=f"Warning: possible stall in {stage}",
+                        meta={"soft_stall_at": datetime.now().isoformat()},
+                    )
+                    continue
+                # Hard stall: soft_stall_at exists and we're past threshold again
+                soft_elapsed = (now - soft_stall_at).total_seconds()
+                if soft_elapsed < CLOUD_STALL_RETRY_COOLDOWN_SECONDS:
+                    continue
+
+                last_cloud_stall = _parse_iso(meta.get("cloud_stall_detected_at"))
+                if last_cloud_stall:
+                    retry_after = (now - last_cloud_stall).total_seconds()
+                    if retry_after < CLOUD_STALL_RETRY_COOLDOWN_SECONDS:
+                        continue
+
+                # Duplicate prevention: check if cloud_triggered_at is recent
+                cloud_triggered_at = meta.get("cloud_triggered_at")
+                if cloud_triggered_at:
+                    try:
+                        triggered_dt = _parse_iso(cloud_triggered_at)
+                        if triggered_dt and (now - triggered_dt).total_seconds() < 600:
+                            logger.info(f"⏳ Cloud job for {stem} was triggered {(now - triggered_dt).total_seconds():.0f}s ago. Skipping re-trigger.")
+                            omega_db.update_job_via_track(stem, meta={"soft_stall_at": ""})
+                            continue
+                    except Exception:
+                        pass
+
+                try:
+                    apply_transition(
                         job_id=stem,
                         job_stem=stem,
                         from_stage=stage,
                         to_stage="TRANSLATING_CLOUD_SUBMITTED",
                         processing_step="translate_submit",
                         worker_id="stall_detector",
-                        reason=f"Cloud stall recovery - re-triggering from {stage}",
+                        reason=f"Cloud hard stall recovery - re-triggering from {stage}",
                         skip_validation=_requires_validation_bypass(stage, "TRANSLATING_CLOUD_SUBMITTED"),
+                        status="Cloud stalled; re-triggering",
+                        progress=40.0,
+                        meta={
+                            "cloud_run_execution": "",
+                            "cloud_trigger_last_attempt": 0,
+                            "cloud_trigger_attempts": int(meta.get("cloud_trigger_attempts") or 0) + 1,
+                            "cloud_stall_detected_at": datetime.now().isoformat(),
+                            "stall_restart_count": min(stall_count + 1, MAX_TASK_FAILURES),
+                            "soft_stall_at": "",
+                            "halted": False,
+                        },
                     )
                 except Exception as e:
-                    logger.warning(f"Transition audit failed for {stem}: {e}")
-                omega_db.update_job_via_track(
-                    stem,
-                    stage="TRANSLATING_CLOUD_SUBMITTED",
-                    status="Cloud stalled; re-triggering",
-                    progress=40.0,
-                    meta={
-                        "cloud_run_execution": "",
-                        "cloud_trigger_last_attempt": 0,
-                        "cloud_trigger_attempts": int(meta.get("cloud_trigger_attempts") or 0) + 1,
-                        "cloud_stall_detected_at": datetime.now().isoformat(),
-                        "stall_restart_count": stall_count + 1,
-                    },
-                )
+                    logger.warning(f"Cloud stall recovery transition failed for {stem}: {e}")
                 continue
 
             omega_db.update_job_via_track(
@@ -1936,13 +2185,14 @@ def process_jobs(executor):
         except Exception as loop_exc:
             logger.error(f"❌ Stall detection error for {stem}: {loop_exc}")
 
-    # 1. Recover stalled ingest jobs (video already moved to Vault)
+    # 1. Recover ingest jobs (stalled or explicit retry from Vault)
     now = datetime.now()
     for job in jobs:
         stem = job.get("file_stem")
         if not stem or _is_task_active(stem):
             continue
-        if (job.get("stage") or "").upper() != "INGEST":
+        stage = (job.get("stage") or "").upper()
+        if stage not in {"INGEST", "QUEUED"}:
             continue
         if is_in_cooldown(stem):
             continue
@@ -1950,27 +2200,43 @@ def process_jobs(executor):
             meta = _job_meta(job)
             if meta.get("halted"):
                 continue
+
+            retry_requested_at = _parse_iso(meta.get("retry_requested_at"))
+            retry_requested_recently = False
+            if retry_requested_at:
+                retry_age_seconds = (now - retry_requested_at).total_seconds()
+                retry_requested_recently = retry_age_seconds <= INGEST_RETRY_RECOVERY_WINDOW_SECONDS
+            explicit_retry = _is_truthy(meta.get("retry_force_ingest_recovery")) or retry_requested_recently
+
             updated_at = _parse_iso(job.get("updated_at"))
-            if not updated_at or (now - updated_at).total_seconds() < INGEST_STALL_SECONDS:
+            stalled_ingest = (
+                stage == "INGEST"
+                and updated_at is not None
+                and (now - updated_at).total_seconds() >= INGEST_STALL_SECONDS
+            )
+            if not explicit_retry and not stalled_ingest:
                 continue
 
             skel_path = config.find_skeleton(stem)
             if skel_path:
-                logger.warning("⚠️ Ingest stalled for %s but skeleton exists. Advancing stage.", stem)
+                logger.warning("⚠️ Ingest recovery for %s: skeleton already exists. Advancing stage.", stem)
                 # Record transition for audit
                 try:
-                    execute_transition(
+                    apply_transition(
                         job_id=stem,
                         job_stem=stem,
-                        from_stage="INGEST",
+                        from_stage=stage if stage else "QUEUED",
                         to_stage="TRANSCRIBED",
                         processing_step="transcribe",
                         worker_id="omega_manager",
-                        reason="Stalled ingest recovery - skeleton exists",
+                        reason="Ingest recovery - skeleton exists",
+                        skip_validation=True,
+                        status="Ready for Translation",
+                        progress=30.0,
+                        meta={"retry_force_ingest_recovery": False, "retry_requested_at": ""},
                     )
                 except Exception as e:
-                    logger.warning(f"Transition audit failed for {stem}: {e}")
-                omega_db.update_job_via_track(stem, stage="TRANSCRIBED", status="Ready for Translation", progress=30.0)
+                    logger.warning(f"Ingest recovery transition failed for {stem}: {e}")
                 continue
 
             # Check if video already in vault (prefer stored vault path / original filename)
@@ -1994,10 +2260,38 @@ def process_jobs(executor):
                         video_vault = candidate
 
             if video_vault and video_vault.exists():
-                logger.warning("⚠️ Ingest stalled for %s but video exists in Vault. Retrying ingest.", stem)
-                _add_task(stem)
-                executor.submit(task_wrapper, stem, "IngestRecovery", _run_ingest_recovery, stem, video_vault)
+                reason = "retry request" if explicit_retry else "stall detector"
+                logger.warning(
+                    "⚠️ Ingest recovery for %s (%s): video exists in Vault. Re-running transcription.",
+                    stem,
+                    reason,
+                )
+                try:
+                    apply_transition(
+                        job_id=stem,
+                        job_stem=stem,
+                        from_stage=stage if stage else "QUEUED",
+                        to_stage="INGEST",
+                        worker_id="omega_manager",
+                        reason=f"Ingest retry from Vault ({reason})",
+                        skip_validation=True,
+                        status="Retrying ingest from Vault",
+                        progress=10.0,
+                        meta={"retry_force_ingest_recovery": False, "retry_requested_at": ""},
+                    )
+                except Exception as e:
+                    logger.warning(f"Ingest retry transition failed for {stem}: {e}")
+                if _add_task(stem):
+                    executor.submit(task_wrapper, stem, "IngestRecovery", _run_ingest_recovery, stem, video_vault)
                 continue
+
+            if explicit_retry:
+                omega_db.update_job_via_track(
+                    stem,
+                    status="Retry blocked: source video missing in Vault",
+                    progress=0.0,
+                    meta={"retry_force_ingest_recovery": False},
+                )
         except Exception as loop_exc:
             logger.error(f"❌ Ingest recovery error for {stem}: {loop_exc}")
 
@@ -2038,9 +2332,8 @@ def process_jobs(executor):
                 continue
 
             if stage in {"QUEUED", "INGEST", ""}:
-                # Record transition for audit
                 try:
-                    execute_transition(
+                    apply_transition(
                         job_id=stem,
                         job_stem=stem,
                         from_stage=stage if stage else "QUEUED",
@@ -2048,10 +2341,11 @@ def process_jobs(executor):
                         processing_step="transcribe",
                         worker_id="omega_manager",
                         reason="Stage auto-correction - skeleton exists",
+                        status="Ready for Translation",
+                        progress=30.0,
                     )
                 except Exception as e:
-                    logger.warning(f"Transition audit failed for {stem}: {e}")
-                omega_db.update_job_via_track(stem, stage="TRANSCRIBED", status="Ready for Translation", progress=30.0)
+                    logger.warning(f"Stage auto-correction transition failed for {stem}: {e}")
                 stage = "TRANSCRIBED"
             if stage not in {"TRANSCRIBED", "TRANSLATING"}:
                 continue
@@ -2135,6 +2429,8 @@ def process_jobs(executor):
                         except Exception:
                             pass
                     needs_trigger = execution_value in (None, "", "unknown") and not recently_triggered
+                    # GUARDRAIL: Cap total Cloud Run trigger attempts to prevent runaway cost
+                    MAX_CLOUD_TRIGGERS = 3  # Max 3 full Cloud Run executions per job
                     if (
                         cloud_run_job
                         and stage == "TRANSLATING_CLOUD_SUBMITTED"
@@ -2142,46 +2438,66 @@ def process_jobs(executor):
                     ):
                         now = time.time()
                         attempts = int(meta.get("cloud_trigger_attempts") or 0)
+                        if attempts >= MAX_CLOUD_TRIGGERS:
+                            logger.error(
+                                f"🛑 COST GUARDRAIL: {stem} has reached {attempts} Cloud Run trigger attempts "
+                                f"(limit: {MAX_CLOUD_TRIGGERS}). Marking as DEAD to prevent runaway costs."
+                            )
+                            try:
+                                apply_transition(
+                                    job_id=stem,
+                                    job_stem=stem,
+                                    from_stage=stage,
+                                    to_stage="DEAD",
+                                    worker_id="omega_manager",
+                                    reason=f"Cost guardrail: exceeded {MAX_CLOUD_TRIGGERS} Cloud Run attempts",
+                                    skip_validation=_requires_validation_bypass(stage, "DEAD"),
+                                    status=f"DEAD: exceeded {MAX_CLOUD_TRIGGERS} Cloud Run attempts",
+                                    meta={"halted": True, "halt_reason": "cost_guardrail_max_triggers"},
+                                )
+                            except Exception as te:
+                                logger.warning(f"Cost guardrail transition to DEAD failed for {stem}: {te}")
+                            continue
                         last_attempt = float(meta.get("cloud_trigger_last_attempt") or 0.0)
                         backoff = min(2 ** max(0, attempts), 300.0)
                         if now - last_attempt >= backoff:
                             omega_db.update_job_via_track(stem, status="Triggering cloud worker…")
-                        args = [
-                            "--job-id",
-                            str(cloud_job_id),
-                            "--bucket",
-                            bucket_name,
-                            "--prefix",
-                            prefix,
-                        ]
-                        try:
-                            resp = run_cloud_run_job(
-                                job_name=cloud_run_job,
-                                region=cloud_run_region,
-                                project=cloud_run_project,
-                                args=args,
-                            )
-                            omega_db.update_job_via_track(
-                                stem,
-                                status="Cloud worker started",
-                                meta={
-                                    "cloud_run_execution": resp.get("name"),
-                                    "cloud_triggered_at": datetime.now().isoformat(),
-                                    "cloud_trigger_attempts": attempts,
-                                    "cloud_trigger_last_attempt": now,
-                                },
-                            )
-                        except Exception as e:
-                            omega_db.update_job_via_track(
-                                stem,
-                                status=f"Cloud trigger failed: {e}",
-                                meta={
-                                    "cloud_trigger_error": str(e),
-                                    "cloud_trigger_failed_at": datetime.now().isoformat(),
-                                    "cloud_trigger_attempts": attempts + 1,
-                                    "cloud_trigger_last_attempt": now,
-                                },
-                            )
+                            args = [
+                                "--job-id",
+                                str(cloud_job_id),
+                                "--bucket",
+                                bucket_name,
+                                "--prefix",
+                                prefix,
+                            ]
+                            try:
+                                resp = run_cloud_run_job(
+                                    job_name=cloud_run_job,
+                                    region=cloud_run_region,
+                                    project=cloud_run_project,
+                                    args=args,
+                                )
+                                omega_db.update_job_via_track(
+                                    stem,
+                                    status="Cloud worker started",
+                                    meta={
+                                        "cloud_run_execution": resp.get("name"),
+                                        "cloud_triggered_at": datetime.now().isoformat(),
+                                        "cloud_trigger_attempts": attempts,
+                                        "cloud_trigger_last_attempt": now,
+                                    },
+                                )
+                            except Exception as e:
+                                omega_db.update_job_via_track(
+                                    stem,
+                                    status=f"Cloud trigger failed: {e}",
+                                    meta={
+                                        "cloud_trigger_error": str(e),
+                                        "cloud_trigger_failed_at": datetime.now().isoformat(),
+                                        "cloud_trigger_attempts": attempts + 1,
+                                        "cloud_trigger_last_attempt": now,
+                                    },
+                                )
 
                     # Optional: reflect cloud progress into the dashboard.
                     try:
@@ -2307,7 +2623,7 @@ def process_jobs(executor):
                         json.dump(reviewed_payload.get("segments", reviewed_payload), f, indent=2, ensure_ascii=False)
 
                     try:
-                        execute_transition(
+                        apply_transition(
                             job_id=stem,
                             job_stem=stem,
                             from_stage="AWAITING_REVIEW",
@@ -2315,20 +2631,17 @@ def process_jobs(executor):
                             processing_step="human_review",
                             worker_id="omega_manager",
                             reason="Human review portal approval received",
+                            skip_validation=_requires_validation_bypass("AWAITING_REVIEW", "REVIEWED"),
+                            status="Human Review Complete",
+                            progress=72.0,
+                            meta={
+                                "human_review_complete": True,
+                                "human_review_completed_at": datetime.now().isoformat(),
+                                "human_reviewer": reviewed_payload.get("approved_by", "Reviewer"),
+                            },
                         )
                     except Exception as e:
-                        logger.warning(f"Transition audit failed for {stem}: {e}")
-                    omega_db.update_job_via_track(
-                        stem,
-                        stage="REVIEWED",
-                        status="Human Review Complete",
-                        progress=72.0,
-                        meta={
-                            "human_review_complete": True,
-                            "human_review_completed_at": datetime.now().isoformat(),
-                            "human_reviewer": reviewed_payload.get("approved_by", "Reviewer"),
-                        },
-                    )
+                        logger.warning(f"Human review transition failed for {stem}: {e}")
                     logger.info("✅ Human review complete: %s (by %s)", stem, reviewed_payload.get("approved_by", "Reviewer"))
                     
                 except Exception as e:
@@ -2366,7 +2679,7 @@ def process_jobs(executor):
             stage = (job.get("stage") or "").upper()
             if stage in {"TRANSCRIBED", "TRANSLATING"}:
                 try:
-                    execute_transition(
+                    apply_transition(
                         job_id=stem,
                         job_stem=stem,
                         from_stage=stage,
@@ -2374,10 +2687,12 @@ def process_jobs(executor):
                         processing_step="translate_detect",
                         worker_id="omega_manager",
                         reason="Local translation file detected",
+                        status="Ready for Review",
+                        progress=55.0,
+                        meta={"translation_path": str(trans)},
                     )
                 except Exception as e:
-                    logger.warning(f"Transition audit failed for {stem}: {e}")
-                omega_db.update_job_via_track(stem, stage="TRANSLATED", status="Ready for Review", progress=55.0, meta={"translation_path": str(trans)})
+                    logger.warning(f"Transition to TRANSLATED failed for {stem}: {e}")
                 stage = "TRANSLATED"
             if stage not in {"TRANSLATED", "REVIEWING"}:
                 continue
@@ -2397,6 +2712,16 @@ def process_jobs(executor):
         if is_in_cooldown(stem): continue
         
         try:
+            # Race condition guard: if cloud_sync_service is actively downloading
+            # this artifact, skip and let it finish (avoids partial file reads)
+            try:
+                sync_state_rec = omega_db.get_sync_state(stem, 'approved_json')
+                if sync_state_rec and sync_state_rec.get('state') in ('DOWNLOADING', 'DOWNLOADED'):
+                    logger.debug(f"Skipping {stem}: cloud_sync is handling approved.json (state={sync_state_rec.get('state')})")
+                    continue
+            except Exception:
+                pass
+
             job = jobs_by_stem.get(stem) or omega_db.get_job_via_track(stem)
             if job:
                 meta = _job_meta(job)
@@ -2406,24 +2731,27 @@ def process_jobs(executor):
                     continue
                 stage = (job.get("stage") or "").upper()
                 if stage in {"TRANSLATED", "REVIEWING"}:
-                    try:
-                        execute_transition(
-                            job_id=stem,
-                            job_stem=stem,
-                            from_stage=stage,
-                            to_stage="REVIEWED",
-                            processing_step="review_detect",
-                            worker_id="omega_manager",
-                            reason="Approved JSON file detected on disk",
-                        )
-                    except Exception as e:
-                        logger.warning(f"Transition audit failed for {stem}: {e}")
-                    omega_db.update_job_via_track(stem, stage="REVIEWED", status="Editor Approved", progress=70.0)
+                    # Use artifact lock to prevent concurrent reads with cloud_sync_service
+                    with job_artifact_lock(stem, "approved_json"):
+                        try:
+                            apply_transition(
+                                job_id=stem,
+                                job_stem=stem,
+                                from_stage=stage,
+                                to_stage="REVIEWED",
+                                processing_step="review_detect",
+                                worker_id="omega_manager",
+                                reason="Approved JSON file detected on disk",
+                                status="Editor Approved",
+                                progress=70.0,
+                            )
+                        except Exception as e:
+                            logger.warning(f"Transition to REVIEWED failed for {stem}: {e}")
                     stage = "REVIEWED"
                     # Mark sync state as SYNCED since approved.json is present on disk
                     try:
-                        sync_state = omega_db.get_sync_state(stem, 'approved_json')
-                        if sync_state and sync_state.get('state') != 'SYNCED':
+                        sync_state_val = omega_db.get_sync_state(stem, 'approved_json')
+                        if sync_state_val and sync_state_val.get('state') != 'SYNCED':
                             omega_db.update_sync_state(stem, 'approved_json', 'SYNCED')
                             logger.info(f"🔄 Marked sync state SYNCED for {stem} (approved.json on disk)")
                     except Exception:
@@ -2641,13 +2969,22 @@ def process_jobs(executor):
                 # Auto-Correction: If video exists but DB says otherwise, mark as DONE.
                 if job and job.get("stage") != "COMPLETED":
                     logger.info(f"✅ Auto-Correcting Status for {stem} (Video Exists)")
-                    omega_db.update_job_via_track(
-                        stem,
-                        stage="COMPLETED",
-                        status="Done",
-                        progress=100.0,
-                        meta={"final_output": str(legacy_output), "last_error": "", "failed_at": ""},
-                    )
+                    current_stage = (job.get("stage") or "FINALIZED").upper()
+                    try:
+                        apply_transition(
+                            job_id=stem,
+                            job_stem=stem,
+                            from_stage=current_stage,
+                            to_stage="COMPLETED",
+                            worker_id="omega_manager",
+                            reason="Auto-correction: legacy output video exists",
+                            skip_validation=_requires_validation_bypass(current_stage, "COMPLETED"),
+                            status="Done",
+                            progress=100.0,
+                            meta={"final_output": str(legacy_output), "last_error": "", "failed_at": ""},
+                        )
+                    except Exception as e:
+                        logger.warning(f"Auto-correction transition to COMPLETED failed for {stem}: {e}")
                 # Stop re-triggering from stale SRTs.
                 done_srt = srt.parent / f"DONE_{srt.name}"
                 try:
@@ -2667,7 +3004,7 @@ def process_jobs(executor):
             stage = (job.get("stage") or "").upper()
             if stage in {"REVIEWED", "FINALIZING"}:
                 try:
-                    execute_transition(
+                    apply_transition(
                         job_id=stem,
                         job_stem=stem,
                         from_stage=stage,
@@ -2675,10 +3012,11 @@ def process_jobs(executor):
                         processing_step="finalize",
                         worker_id="omega_manager",
                         reason="SRT exists, advancing to ready-to-burn state",
+                        status="Ready to Burn",
+                        progress=90.0,
                     )
                 except Exception as e:
-                    logger.warning(f"Transition audit failed for {stem}: {e}")
-                omega_db.update_job_via_track(stem, stage="FINALIZED", status="Ready to Burn", progress=90.0)
+                    logger.warning(f"Transition to FINALIZED failed for {stem}: {e}")
                 stage = "FINALIZED"
             if stage not in {"FINALIZED", "BURNING"}:
                 continue
@@ -2686,7 +3024,9 @@ def process_jobs(executor):
             status = job.get("status", "")
             source_path = str(meta.get("source_path") or "")
             review_required = bool(meta.get("review_required")) or ("/02_human_review/" in source_path.lower())
-            burn_approved = bool(meta.get("burn_approved")) or (status == "Approved for Burn")
+            burn_approved = bool(meta.get("burn_approved")) or (
+                status in {"Approved for Burn", "Approved - queued for burn"}
+            )
 
             if review_required and not burn_approved:
                 if config.OMEGA_ALLOW_AUTO_BURN:
@@ -2740,6 +3080,22 @@ def _run_translate_cloud(skel, stem, target_language):
 
     logger.info(f"☁️ Cloud Run trigger: job={job_name}, region={region}, project={project or 'default'}")
 
+    # Guardrail: do not trigger cloud execution when required payload artifacts
+    # were never uploaded (prevents permanent TRANSLATING_CLOUD_SUBMITTED stalls).
+    storage_client = storage.Client()
+    paths = GcsJobPaths(bucket=bucket_name, prefix=prefix, job_id=stem)
+    required_blobs = {
+        "job.json": paths.job_blob,
+        "skeleton.json": paths.skeleton_blob,
+    }
+    missing = [name for name, blob in required_blobs.items() if not blob_exists(storage_client, bucket_name, blob)]
+    if missing:
+        missing_list = ", ".join(missing)
+        raise RuntimeError(
+            f"Cloud payload missing for {stem}: {missing_list}. "
+            "Retry ingest recovery to re-upload artifacts."
+        )
+
     try:
         execution = run_cloud_run_job(job_name=job_name, args=args, region=region, project=project)
         # Fixed: run_cloud_run_job returns a dict, not an object - use dict access
@@ -2747,7 +3103,7 @@ def _run_translate_cloud(skel, stem, target_language):
         logger.info(f"🚀 Triggered Cloud Run: {execution_name}")
 
         try:
-            execute_transition(
+            apply_transition(
                 job_id=stem,
                 job_stem=stem,
                 from_stage="TRANSCRIBED",
@@ -2755,19 +3111,15 @@ def _run_translate_cloud(skel, stem, target_language):
                 processing_step="translate_cloud",
                 worker_id="omega_manager",
                 reason="Cloud Run job triggered for translation",
+                status="Submitted to Cloud",
+                progress=40.0,
+                meta={
+                    "cloud_run_execution": execution_name,
+                    "cloud_triggered_at": datetime.now().isoformat(),
+                },
             )
         except Exception as e:
-            logger.warning(f"Transition audit failed for {stem}: {e}")
-        omega_db.update_job_via_track(
-            stem,
-            stage="TRANSLATING_CLOUD_SUBMITTED",
-            status="Submitted to Cloud",
-            progress=40.0,
-            meta={
-                "cloud_run_execution": execution_name,
-                "cloud_triggered_at": datetime.now().isoformat(),
-            }
-        )
+            logger.warning(f"Transition TRANSCRIBED->TRANSLATING_CLOUD_SUBMITTED failed for {stem}: {e}")
     except Exception as e:
         logger.error(f"❌ Failed to trigger Cloud Run: {e}")
         omega_db.update_job_via_track(stem, status=f"Cloud Trigger Failed: {e}")
@@ -2775,7 +3127,22 @@ def _run_translate_cloud(skel, stem, target_language):
 
 def _run_review(trans, stem):
     logger.info(f"🕵️‍♂️ Reviewing: {stem}")
-    omega_db.update_job_via_track(stem, stage="REVIEWING", status="AI Reviewing", progress=60.0)
+    job = omega_db.get_job_via_track(stem)
+    review_from_stage = (job.get("stage") or "TRANSLATED").upper() if job else "TRANSLATED"
+    try:
+        apply_transition(
+            job_id=stem,
+            job_stem=stem,
+            from_stage=review_from_stage,
+            to_stage="REVIEWING",
+            processing_step="review",
+            worker_id="omega_manager",
+            reason="Starting AI editor review",
+            status="AI Reviewing",
+            progress=60.0,
+        )
+    except Exception as e:
+        logger.warning(f"Transition to REVIEWING failed for {stem}: {e}")
 
     editor.review(trans)
     track = omega_db.get_track_by_job(stem)
@@ -2783,7 +3150,7 @@ def _run_review(trans, stem):
     if master_script_id:
         omega_db.update_master_script(master_script_id, state="approved")
     try:
-        execute_transition(
+        apply_transition(
             job_id=stem,
             job_stem=stem,
             from_stage="REVIEWING",
@@ -2791,17 +3158,18 @@ def _run_review(trans, stem):
             processing_step="review",
             worker_id="omega_manager",
             reason="AI editor review completed",
+            status="Editor Approved",
+            progress=70.0,
         )
     except Exception as e:
-        logger.warning(f"Transition audit failed for {stem}: {e}")
-    omega_db.update_job_via_track(stem, stage="REVIEWED", status="Editor Approved", progress=70.0)
+        logger.warning(f"Transition REVIEWING->REVIEWED failed for {stem}: {e}")
 
 def _run_finalize(approved, stem):
     logger.info(f"🎬 Finalizing: {stem}")
     job = omega_db.get_job_via_track(stem)
     current_stage = (job.get("stage") or "REVIEWED").upper() if job else "REVIEWED"
     try:
-        execute_transition(
+        apply_transition(
             job_id=stem,
             job_stem=stem,
             from_stage=current_stage,
@@ -2809,76 +3177,60 @@ def _run_finalize(approved, stem):
             processing_step="finalize",
             worker_id="omega_manager",
             reason="Starting SRT generation",
+            status="Finalizing",
+            progress=80.0,
         )
     except Exception as e:
-        logger.warning(f"Transition audit failed for {stem}: {e}")
-    omega_db.update_job_via_track(stem, stage="FINALIZING", status="Finalizing", progress=80.0)
+        logger.warning(f"Transition to FINALIZING failed for {stem}: {e}")
 
     with job_artifact_lock(stem, timeout_seconds=120.0):
         job = omega_db.get_job_via_track(stem)
         target_language = job.get("target_language", "is") if job else "is"
+        approved_path = Path(approved)
+        integrity_report = _ensure_text_integrity(
+            stem=stem,
+            approved_path=approved_path,
+            target_language=target_language,
+        )
+        if integrity_report.get("enabled"):
+            try:
+                omega_db.update_job_via_track(stem, meta={"qa_text_integrity": integrity_report})
+            except Exception as e:
+                logger.warning(f"Text integrity QA meta update failed for {stem}: {e}")
 
-        # Check if segments are already normalized (new flow)
-        with open(approved, "r", encoding="utf-8") as f:
-            approved_data = json.load(f)
+        # Always run full finalization — even for pre-normalized segments.
+        # The finalizer applies broadcast-quality passes that segments_to_srt() skips:
+        # CPS optimization, orphan rescue, duration enforcement, gap enforcement,
+        # scene-aware timing, frame quantization, and emergency merge.
 
-        already_normalized = approved_data.get("normalized_for_review", False)
-
-        if already_normalized:
-            # NEW FLOW: Segments are pre-normalized, just convert to SRT
-            logger.info(f"   ✅ Using pre-normalized segments (new flow)")
-            segments = approved_data.get("segments", [])
-            srt_path = config.SRT_DIR / f"{stem}.srt"
-            finalizer.segments_to_srt(segments, srt_path, target_language=target_language)
-
-            # Also create normalized JSON for compatibility
-            normalized_path = config.SRT_DIR / f"{stem}_normalized.json"
-            normalized_payload = {
-                "events": [
-                    {
-                        "start": seg.get("start"),
-                        "end": seg.get("end"),
-                        "lines": seg.get("text", "").split("\n"),
-                    }
-                    for seg in segments
-                ],
-                "language": target_language,
-            }
-            with open(normalized_path, "w", encoding="utf-8") as f:
-                json.dump(normalized_payload, f, ensure_ascii=False, indent=2)
-            logger.info(f"   ✅ Created normalized JSON: {normalized_path.name}")
-        else:
-            # LEGACY FLOW: Run full finalization for old jobs
-            logger.info(f"   ⚠️ Using legacy finalization (segments not pre-normalized)")
-
-            # Find video path for scene-aware timing (optional but recommended)
-            video_path = None
-            meta = job.get("meta", {}) if job else {}
-            vault_path = meta.get("vault_path")
-            if vault_path:
-                candidate = Path(str(vault_path))
+        # Find video path for scene-aware timing (optional but recommended)
+        video_path = None
+        meta = job.get("meta", {}) if job else {}
+        vault_path = meta.get("vault_path")
+        if vault_path:
+            candidate = Path(str(vault_path))
+            if candidate.exists():
+                video_path = candidate
+        if video_path is None:
+            original_filename = meta.get("original_filename")
+            if original_filename:
+                candidate = config.VAULT_VIDEOS / original_filename
                 if candidate.exists():
                     video_path = candidate
-            if video_path is None:
-                original_filename = meta.get("original_filename")
-                if original_filename:
-                    candidate = config.VAULT_VIDEOS / original_filename
-                    if candidate.exists():
-                        video_path = candidate
-            if video_path is None:
-                original_stem = meta.get("original_stem")
-                video_path = _find_vault_video(original_stem or stem)
+        if video_path is None:
+            original_stem = meta.get("original_stem")
+            video_path = _find_vault_video(original_stem or stem)
 
-            # Finalize with video-aware timing if video found
-            finalizer.finalize(
-                approved,
-                target_language=target_language,
-                video_path=video_path,
-                apply_scene_snap=video_path is not None,
-            )
+        # Finalize with video-aware timing if video found
+        finalizer.finalize(
+            approved,
+            target_language=target_language,
+            video_path=video_path,
+            apply_scene_snap=video_path is not None,
+        )
 
     try:
-        execute_transition(
+        apply_transition(
             job_id=stem,
             job_stem=stem,
             from_stage="FINALIZING",
@@ -2886,10 +3238,11 @@ def _run_finalize(approved, stem):
             processing_step="finalize",
             worker_id="omega_manager",
             reason="SRT written successfully",
+            status="Ready to Burn",
+            progress=90.0,
         )
     except Exception as e:
-        logger.warning(f"Transition audit failed for {stem}: {e}")
-    omega_db.update_job_via_track(stem, stage="FINALIZED", status="Ready to Burn", progress=90.0)
+        logger.warning(f"Transition FINALIZING->FINALIZED failed for {stem}: {e}")
 
 def _run_burn(srt, stem):
     logger.info(f"🔥 Burning: {stem}")
@@ -2898,19 +3251,8 @@ def _run_burn(srt, stem):
         meta = job.get("meta", {}) if job else {}
         current_stage = (job.get("stage") or "FINALIZED").upper() if job else "FINALIZED"
 
-        # Clean up old video from previous burns to prevent self-heal race condition
-        old_output = meta.get("final_output")
-        if old_output:
-            old_path = Path(str(old_output))
-            if old_path.exists():
-                try:
-                    old_path.unlink()
-                    logger.info(f"   🗑️ Deleted old video: {old_path.name}")
-                except Exception as e:
-                    logger.warning(f"   Failed to delete old video {old_path.name}: {e}")
-
         try:
-            execute_transition(
+            apply_transition(
                 job_id=stem,
                 job_stem=stem,
                 from_stage=current_stage,
@@ -2918,12 +3260,14 @@ def _run_burn(srt, stem):
                 processing_step="burn",
                 worker_id="omega_manager",
                 reason="Starting FFmpeg video burn",
+                status="Burning",
+                progress=95.0,
+                meta={"burn_started_at": datetime.now().isoformat()},
             )
         except Exception as e:
-            logger.warning(f"Transition audit failed for {stem}: {e}")
-        omega_db.update_job_via_track(stem, stage="BURNING", status="Burning", progress=95.0, meta={"burn_started_at": datetime.now().isoformat()})
+            logger.warning(f"Transition to BURNING failed for {stem}: {e}")
 
-        subtitle_style = job.get("subtitle_style", "Classic") if job else "Classic"
+        subtitle_style = job.get("subtitle_style", "RUV_BOX") if job else "RUV_BOX"
         delivery_profile = job.get("delivery_profile") if job else None  # Read from job settings
         video_path = None
         vault_path = meta.get("vault_path")
@@ -2955,6 +3299,17 @@ def _run_burn(srt, stem):
             raise RuntimeError(err_msg)
 
         approved_path = config.TRANSLATED_DONE_DIR / f"{stem}_APPROVED.json"
+        integrity_report = _ensure_text_integrity(
+            stem=stem,
+            approved_path=approved_path,
+            target_language=job.get("target_language", "is") if job else "is",
+        )
+        if integrity_report.get("enabled"):
+            try:
+                omega_db.update_job_via_track(stem, meta={"qa_text_integrity": integrity_report})
+            except Exception as e:
+                logger.warning(f"Text integrity QA meta update failed for {stem}: {e}")
+
         min_coverage = _safe_float_env("OMEGA_MIN_TEXT_COVERAGE", 0.995)
         if approved_path.exists():
             coverage = finalizer.compute_srt_text_coverage(
@@ -2978,7 +3333,7 @@ def _run_burn(srt, stem):
 
         output_video = publisher.publish(video_path, srt, subtitle_style=subtitle_style, delivery_profile=delivery_profile)
         try:
-            execute_transition(
+            apply_transition(
                 job_id=stem,
                 job_stem=stem,
                 from_stage="BURNING",
@@ -2986,21 +3341,17 @@ def _run_burn(srt, stem):
                 processing_step="burn",
                 worker_id="omega_manager",
                 reason="Video output generated successfully",
+                status="Done",
+                progress=100.0,
+                meta={
+                    "final_output": str(output_video),
+                    "burn_end_time": datetime.now().isoformat(),
+                    "last_error": "",
+                    "failed_at": "",
+                },
             )
         except Exception as e:
-            logger.warning(f"Transition audit failed for {stem}: {e}")
-        omega_db.update_job_via_track(
-            stem,
-            stage="COMPLETED",
-            status="Done",
-            progress=100.0,
-            meta={
-                "final_output": str(output_video),
-                "burn_end_time": datetime.now().isoformat(),
-                "last_error": "",
-                "failed_at": "",
-            },
-        )
+            logger.warning(f"Transition BURNING->COMPLETED failed for {stem}: {e}")
         logger.info(f"✅ Job Complete: {output_video.name}")
         
         done_srt = srt.parent / f"DONE_{srt.name}"
@@ -3047,10 +3398,23 @@ def main():
     # 22 workers allows for full concurrency of 20 client jobs + 2 overhead
     # Most steps are I/O bound (Cloud API), so high thread count is safe.
     last_reconcile = 0
+    db_failure_streak = 0
+    circuit_open_until: Optional[float] = None
     with ThreadPoolExecutor(max_workers=22) as executor:
         while True:
             try:
                 system_health.update_heartbeat("omega_manager")
+
+                # Circuit breaker: skip main loop work when DB is down
+                now_cb = time.time()
+                if circuit_open_until and now_cb < circuit_open_until:
+                    remaining = max(0.0, circuit_open_until - now_cb)
+                    logger.warning(
+                        "Manager DB circuit breaker open (%.0fs remaining); skipping this cycle",
+                        remaining,
+                    )
+                    time.sleep(min(10.0, remaining))
+                    continue
                 
                 # Cleanup dead stations (every loop is fine, it's efficient)
                 omega_db.cleanup_dead_stations(timeout_minutes=5)
@@ -3105,15 +3469,51 @@ def main():
 
                     last_reconcile = now_ts
                 
+                # Reset circuit breaker on successful loop iteration
+                if db_failure_streak > 0:
+                    db_failure_streak = 0
+                if circuit_open_until:
+                    logger.info("Manager DB circuit breaker closed (successful loop)")
+                    circuit_open_until = None
+
                 time.sleep(2) # Faster polling since it's non-blocking
-                
+
             except KeyboardInterrupt:
                 logger.info("🛑 Manager Stopped by User")
                 break
             except Exception as e:
                 logger.error(f"🔥 Critical Manager Failure: {e}", exc_info=True)
+                if _is_db_error(e):
+                    db_failure_streak += 1
+                    logger.error(
+                        "Manager DB error (%d/%d): %s",
+                        db_failure_streak,
+                        _MANAGER_DB_FAILURE_THRESHOLD,
+                        e,
+                    )
+                    if db_failure_streak >= _MANAGER_DB_FAILURE_THRESHOLD:
+                        circuit_open_until = time.time() + _MANAGER_DB_COOLDOWN_SECONDS
+                        db_failure_streak = 0
+                        logger.error(
+                            "Manager DB circuit breaker opened for %.0fs",
+                            _MANAGER_DB_COOLDOWN_SECONDS,
+                        )
+                else:
+                    db_failure_streak = 0
                 time.sleep(10)
 
 if __name__ == "__main__":
-    with ProcessLock("omega_manager"):
-        main()
+    try:
+        with ProcessLock("omega_manager"):
+            main()
+    except KeyboardInterrupt:
+        logger.info("🛑 Manager Stopped by User")
+        raise SystemExit(0)
+    except SystemExit as exc:
+        code = exc.code if isinstance(exc.code, int) else 1
+        if code not in (0, None):
+            logger.error("🛑 Omega Manager exiting with SystemExit(%s)", exc.code)
+        raise
+    except BaseException:
+        logger.exception("🔥 Unhandled Omega Manager crash")
+        raise

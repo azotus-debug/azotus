@@ -98,6 +98,8 @@ module.exports = {
       autorestart: true,
       max_restarts: 20,
       restart_delay: 2000,
+      kill_timeout: 5000,
+      max_memory_restart: "1G",
       out_file: path.join(ROOT, "logs", "fastapi.out.log"),
       error_file: path.join(ROOT, "logs", "fastapi.err.log"),
       env: {
@@ -113,6 +115,8 @@ module.exports = {
       autorestart: true,
       max_restarts: 20,
       restart_delay: 2000,
+      kill_timeout: 5000,
+      max_memory_restart: "1G",
       out_file: path.join(ROOT, "logs", "manager.out.log"),
       error_file: path.join(ROOT, "logs", "manager.err.log"),
       env: {
@@ -131,6 +135,8 @@ module.exports = {
       autorestart: true,
       max_restarts: 20,
       restart_delay: 2000,
+      kill_timeout: 5000,
+      max_memory_restart: "1G",
       out_file: path.join(ROOT, "logs", "cloud_sync.out.log"),
       error_file: path.join(ROOT, "logs", "cloud_sync.err.log"),
       env: {

@@ -337,6 +337,86 @@ def execute_transition(
     return result
 
 
+def apply_transition(
+    job_id: str,
+    job_stem: str,
+    from_stage: str,
+    to_stage: str,
+    processing_step: Optional[str] = None,
+    worker_id: Optional[str] = None,
+    reason: Optional[str] = None,
+    skip_validation: bool = False,
+    # DB fields to also update via omega_db.update_job_via_track:
+    status: Optional[str] = None,
+    progress: Optional[float] = None,
+    meta: Optional[dict] = None,
+    **db_kwargs,
+) -> Dict[str, Any]:
+    """
+    Validate a stage transition AND write to DB in one atomic call.
+
+    This is the recommended entry point for ALL stage transitions that also
+    need to persist to the database. It combines:
+    1. execute_transition() — validates, audits, publishes events
+    2. omega_db.update_job_via_track() — persists the stage change to DB
+
+    Use this instead of calling execute_transition() + update_job_via_track()
+    separately, which risks the DB write succeeding without validation.
+
+    Args:
+        job_id: The job/track identifier (UUID or stem)
+        job_stem: The job stem/file identifier (e.g., "cbnjd011326cc_is")
+        from_stage: The current stage (legacy string or JobStage value)
+        to_stage: The target stage to transition to
+        processing_step: Optional sub-step within PROCESSING stage
+        worker_id: Optional identifier for the worker performing the transition
+        reason: Optional human-readable reason for the transition
+        skip_validation: If True, skips state machine validation
+        status: Optional status string for the DB record
+        progress: Optional progress percentage (0-100)
+        meta: Optional meta dict to merge into the track's meta
+        **db_kwargs: Additional keyword args passed to update_job_via_track
+                     (e.g., target_language, subtitle_style, output_path)
+
+    Returns:
+        Dict containing transition details (same as execute_transition)
+
+    Raises:
+        InvalidTransitionError: If validation is enabled and transition is invalid
+        TransitionError: If a critical error occurs
+    """
+    # Step 1: Validate + audit + publish event
+    result = execute_transition(
+        job_id=job_id,
+        job_stem=job_stem,
+        from_stage=from_stage,
+        to_stage=to_stage,
+        processing_step=processing_step,
+        worker_id=worker_id,
+        reason=reason,
+        skip_validation=skip_validation,
+    )
+
+    # Step 2: Persist to DB
+    try:
+        omega_db.update_job_via_track(
+            job_stem,
+            stage=to_stage,
+            status=status,
+            progress=progress,
+            meta=meta,
+            **db_kwargs,
+        )
+        result["db_written"] = True
+    except Exception as e:
+        logger.error(f"DB write failed for {job_stem} ({from_stage} -> {to_stage}): {e}")
+        result["db_written"] = False
+        result["db_error"] = str(e)
+        raise
+
+    return result
+
+
 def get_transition_history(
     job_id: Optional[str] = None,
     job_stem: Optional[str] = None,

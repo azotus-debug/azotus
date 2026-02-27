@@ -321,8 +321,8 @@ def find_skeleton(stem: str) -> Optional[Path]:
 
 # Gemini Models
 # ⚠️ CRITICAL: NEVER USE GEMINI 1.5. IT IS BANNED.
-MODEL_TRANSLATOR = "gemini-3-pro-preview"  # High-reasoning translation
-MODEL_EDITOR = "gemini-3-pro-preview"     # High-quality review/polish
+MODEL_TRANSLATOR = "gemini-3.1-pro-preview"  # High-reasoning translation
+MODEL_EDITOR = "gemini-3.1-pro-preview"     # High-quality review/polish
 MODEL_ASSISTANT = "gemini-3-flash-preview"  # Assistant UI
 # Vertex AI requires "global" for preview models (gemini-3-*).
 GEMINI_LOCATION = os.environ.get("GEMINI_LOCATION", "global")
@@ -379,6 +379,33 @@ OMEGA_CLOUD_DOC_BRIEF = os.environ.get("OMEGA_CLOUD_DOC_BRIEF", "1").strip().low
 OMEGA_CLOUD_DOC_BRIEF_SEGMENTS = int(os.environ.get("OMEGA_CLOUD_DOC_BRIEF_SEGMENTS", "120") or "120")
 OMEGA_CLOUD_DOC_BRIEF_CHARS = int(os.environ.get("OMEGA_CLOUD_DOC_BRIEF_CHARS", "12000") or "12000")
 
+# Translation Brief (Phase 0 pre-analysis: full-program context for every paragraph)
+OMEGA_TRANSLATION_BRIEF_ENABLED = os.environ.get("OMEGA_TRANSLATION_BRIEF_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
+OMEGA_TRANSLATION_BRIEF_TIMEOUT = int(os.environ.get("OMEGA_TRANSLATION_BRIEF_TIMEOUT", "120") or "120")
+
+# Sliding Context Window (±N seconds of surrounding source text per paragraph)
+OMEGA_SLIDING_CONTEXT_ENABLED = os.environ.get("OMEGA_SLIDING_CONTEXT_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
+OMEGA_SLIDING_CONTEXT_WINDOW = float(os.environ.get("OMEGA_SLIDING_CONTEXT_WINDOW", "120") or "120")
+
+# v8 Chunked Translation (context caching + 200-segment chunks instead of 1-per-paragraph)
+# When enabled, sends full transcript as cached context and translates in 8-10 parallel chunks.
+# Expected: 2-3 min per program (vs 20-45 min in v7), ~$1.50-3.00 (vs ~$9 in v7).
+OMEGA_V8_CHUNKED_ENABLED = os.environ.get("OMEGA_V8_CHUNKED_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
+OMEGA_V8_CHUNK_SIZE = int(os.environ.get("OMEGA_V8_CHUNK_SIZE", "200") or "200")  # segments per chunk (safe zone: 150-200)
+OMEGA_V8_CHUNK_WAVE_SIZE = int(os.environ.get("OMEGA_V8_CHUNK_WAVE_SIZE", "4") or "4")  # parallel chunks per wave
+OMEGA_V8_CACHE_TTL = int(os.environ.get("OMEGA_V8_CACHE_TTL", "3600") or "3600")  # cache TTL in seconds
+OMEGA_V8_THINKING_BUDGET = int(os.environ.get("OMEGA_V8_THINKING_BUDGET", "24576") or "24576")  # per-chunk thinking
+
+# v9 Two-Pass Translation (Pro creative + Flash QA)
+# When enabled, Gemini Pro translates with a creative prompt (no char limits),
+# then Gemini Flash enforces all mechanical constraints (char limits, CPS, artifacts).
+# This lets Pro focus entirely on natural, idiomatic translation quality.
+# Expected cost: +$0.10-0.15 per program for Flash QA pass.
+OMEGA_FLASH_QA_ENABLED = os.environ.get("OMEGA_FLASH_QA_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
+MODEL_FLASH_QA = os.environ.get("OMEGA_FLASH_QA_MODEL", "gemini-3-flash-preview").strip()
+OMEGA_FLASH_QA_CHUNK_SIZE = int(os.environ.get("OMEGA_FLASH_QA_CHUNK_SIZE", "300") or "300")  # segments per QA chunk
+OMEGA_FLASH_QA_THINKING_LEVEL = os.environ.get("OMEGA_FLASH_QA_THINKING_LEVEL", "LOW").strip().upper()
+
 # --- ELEVENLABS (TRANSCRIPTION + DUBBING) ---
 # API key for ElevenLabs Scribe v2 (get from https://elevenlabs.io)
 ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "").strip()
@@ -406,6 +433,14 @@ OMEGA_TRANSCRIBER = os.environ.get("OMEGA_TRANSCRIBER", "elevenlabs").strip().lo
 if OMEGA_TRANSCRIBER != "elevenlabs":
     logger.warning("OMEGA_TRANSCRIBER=%s is unsupported. ElevenLabs is required.", OMEGA_TRANSCRIBER)
 
+# --- WORSHIP / SINGING DETECTION ---
+# Two-layer detection: audio classification (CNN) + text repetition analysis.
+# Catches sung lyrics that ElevenLabs transcribes as regular speech.
+OMEGA_WORSHIP_DETECTION_ENABLED = os.environ.get("OMEGA_WORSHIP_DETECTION_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
+OMEGA_WORSHIP_REPETITION_WINDOW = int(os.environ.get("OMEGA_WORSHIP_REPETITION_WINDOW", "60") or "60")          # sliding window size (segments)
+OMEGA_WORSHIP_REPETITION_THRESHOLD = int(os.environ.get("OMEGA_WORSHIP_REPETITION_THRESHOLD", "3") or "3")      # min phrase occurrences to flag
+OMEGA_WORSHIP_MIN_CLUSTER_SIZE = int(os.environ.get("OMEGA_WORSHIP_MIN_CLUSTER_SIZE", "8") or "8")              # min consecutive segments to flag a cluster
+
 # --- DEMUCS VOCAL EXTRACTION ---
 # Enable Demucs to remove background music before transcription (requires M2 Mac)
 # This helps prevent transcription of background lyrics
@@ -428,7 +463,7 @@ STYLE_MAP = {
     "News": "RUV_BOX",
     "CBN": "RUV_BOX",
     "700": "RUV_BOX",
-    "DEFAULT": "OMEGA_MODERN"
+    "DEFAULT": "RUV_BOX"
 }
 
 # Burn Method Map
@@ -436,6 +471,7 @@ STYLE_MAP = {
 BURN_METHOD_MAP = {
     "Classic": "RuvBox",   # DIRECT: Use ASS Burn for Classic
     "RuvBox": "RuvBox",    # DIRECT: Use ASS Burn for RuvBox
+    "RUV_BOX": "RuvBox",   # DIRECT: Canonical internal style key
     "Modern": "Default",
     # Folder / legacy aliases
     "Modern_Look": "Default",
@@ -461,6 +497,17 @@ DELIVERY_PROFILES = {
         "description": "Fast hardware encoding (9x), modern compatibility",
         "speed": "9x",
         "compatibility": "Modern (2017+)"
+    },
+    "broadcast_h264_hw": {
+        "name": "Broadcast H.264 (Fast HW)",
+        "encoder": "h264_videotoolbox",
+        "bitrate": "12M",
+        "maxrate": "15M",
+        "bufsize": "24M",
+        "extra_args": ["-profile:v", "high", "-level", "4.1"],
+        "description": "Fast hardware encoding with broad compatibility",
+        "speed": "7x",
+        "compatibility": "Very broad"
     },
     "broadcast_h264": {
         "name": "Broadcast H.264 (Universal)",

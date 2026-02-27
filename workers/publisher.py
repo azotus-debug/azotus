@@ -28,7 +28,36 @@ except ImportError:
 
 logger = logging.getLogger("OmegaManager.Publisher")
 
-ASS_HEADER = """[Script Info]
+
+def _env_truthy(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+def _sanitize_ass_font_name(name: str, fallback: str) -> str:
+    candidate = (name or "").strip()
+    if not candidate:
+        return fallback
+    if re.fullmatch(r"[A-Za-z0-9 _.-]+", candidate):
+        return candidate
+    return fallback
+
+
+def _build_ass_header() -> str:
+    """
+    Build ASS style header with configurable fonts.
+    RuvBox defaults to Arial for reliable glyph coverage across macOS/libass environments.
+    """
+    default_font = _sanitize_ass_font_name(
+        os.environ.get("OMEGA_ASS_FONT_DEFAULT", "Arial"),
+        "Arial",
+    )
+    ruv_font = _sanitize_ass_font_name(
+        os.environ.get("OMEGA_ASS_FONT_RUVBOX", "Arial"),
+        "Arial",
+    )
+    return f"""[Script Info]
 Title: Omega TV Iceland Broadcast Subtitles
 ScriptType: v4.00+
 Collisions: Normal
@@ -37,8 +66,8 @@ PlayResY: 1080
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,48,&H00FFFFFF,&H000000FF,&H8A000000,&H8A000000,-1,0,0,0,100,100,0,0,4,28,0,2,20,20,50,1
-Style: RuvBox,SF Pro Display,65,&H00FFFFFF,&H000000FF,&H33000000,&H33000000,0,0,0,0,100,100,0,0,3,2,0,2,50,50,65,1
+Style: Default,{default_font},48,&H00FFFFFF,&H000000FF,&H8A000000,&H8A000000,0,0,0,0,100,100,0,0,4,28,0,2,20,20,50,1
+Style: RuvBox,{ruv_font},65,&H00FFFFFF,&H000000FF,&H33000000,&H33000000,0,0,0,0,100,100,0,0,3,2,0,2,50,50,65,1
 """
 
 def iso_now():
@@ -132,14 +161,10 @@ def _run_ffmpeg_with_progress(cmd, stem, output_file, video_path):
             logger.warning(f"Could not determine duration for progress: {e}")
             duration_sec = 0
 
-        # Read output line by line
-        start_time = time.time()
-        time_re = re.compile(r"time=(\d+):(\d+):(\d+\.\d+)")
-        
         # Read output line by line with timeout
         start_time = time.time()
-        last_output_time = time.time()
         time_re = re.compile(r"time=(\d+):(\d+):(\d+\.\d+)")
+        progress_db_enabled = True
         
         while True:
             # Check for output with 60s timeout
@@ -157,7 +182,6 @@ def _run_ffmpeg_with_progress(cmd, stem, output_file, video_path):
                 break
             
             if line:
-                last_output_time = time.time()
                 line = line.strip()
                 # Parse time=HH:MM:SS.mm
                 match = time_re.search(line)
@@ -166,8 +190,13 @@ def _run_ffmpeg_with_progress(cmd, stem, output_file, video_path):
                     current_sec = int(h)*3600 + int(m)*60 + float(s)
                     pct = (current_sec / duration_sec) * 100
                     
-                    if time.time() - start_time > 2:
-                        omega_db.update_job_via_track(stem, progress=round(pct, 1), status=f"Burning {int(pct)}%")
+                    if progress_db_enabled and time.time() - start_time > 2:
+                        try:
+                            omega_db.update_job_via_track(stem, progress=round(pct, 1), status=f"Burning {int(pct)}%")
+                        except Exception as db_err:
+                            # Burning must continue even if DB is temporarily unavailable.
+                            progress_db_enabled = False
+                            logger.warning("Progress DB updates disabled for %s: %s", stem, db_err)
                         start_time = time.time()
         
         if process.returncode != 0:
@@ -180,14 +209,14 @@ def _run_ffmpeg_with_progress(cmd, stem, output_file, video_path):
         raise e
 
 
-def publish(video_path: Path, srt_path: Path, subtitle_style: str = "Classic", 
+def publish(video_path: Path, srt_path: Path, subtitle_style: str = "RUV_BOX",
             delivery_profile: str = None):
     """
     Burns subtitles into video using the specified style and delivery profile.
     Args:
         video_path: Path to source video
         srt_path: Path to subtitle SRT file
-        subtitle_style: "Classic" (RuvBox), "Modern" (Default/Shadow), or "Apple"
+        subtitle_style: "RUV_BOX"/"Classic" (RuvBox), "Modern" (Default/Shadow), or "Apple"
         delivery_profile: Encoding profile key from config.DELIVERY_PROFILES.
             If None, uses config.DEFAULT_DELIVERY_PROFILE.
     """
@@ -209,11 +238,12 @@ def publish(video_path: Path, srt_path: Path, subtitle_style: str = "Classic",
         logger.warning(f"Unknown delivery profile '{profile_key}', falling back to broadcast_hevc")
         profile = config.DELIVERY_PROFILES["broadcast_hevc"]
         profile_key = "broadcast_hevc"
+    allow_software_fallback = _env_truthy("OMEGA_BURN_ALLOW_SOFTWARE_FALLBACK", default=False)
     logger.info(f"🔥 Burning Subtitles: {stem} (Style: {subtitle_style}, Profile: {profile['name']})")
 
     # Map User Style to ASS Style Name
     style_map = config.BURN_METHOD_MAP
-    ass_style_name = style_map.get(subtitle_style, "Apple")
+    ass_style_name = style_map.get(subtitle_style, "RuvBox")
 
     if ass_style_name == "Apple":
         logger.info("🍎 Using Apple Style (Overlay Engine)")
@@ -265,15 +295,8 @@ def publish(video_path: Path, srt_path: Path, subtitle_style: str = "Classic",
         # Build filter chain: ass with fontsdir, then format conversion
         vf_filter = f"ass='{ass_path_escaped}':fontsdir='/System/Library/Fonts/',format=yuv420p"
 
-        # STABILITY OVERRIDE:
-        # The 'ass' filter is notoriously unstable with hardware acceleration or high-speed hardware encoders (Code 254).
-        # For Classic/Modern looks, we force use of the 'universal' (libx264) profile or at least a software encoder.
-        if "videotoolbox" in profile.get("encoder", "") or subtitle_style in ["Classic", "Modern"]:
-            logger.info(f"   ⚠️ Forcing stable software encoding for {subtitle_style} style")
-            stable_profile = config.DELIVERY_PROFILES.get("universal", profile)
-            encoder_args = build_encoder_args(stable_profile)
-        else:
-            encoder_args = build_encoder_args(profile)
+        # Use the requested delivery profile directly (including hardware encoders)
+        encoder_args = build_encoder_args(profile)
 
         # Build command
         cmd = [
@@ -320,6 +343,41 @@ def publish(video_path: Path, srt_path: Path, subtitle_style: str = "Classic",
         # Cleanup temp
         if temp_output_path.exists():
             temp_output_path.unlink()
+
+        # Hardware encoders can fail when VideoToolbox sessions are unavailable.
+        # Keep fallback on hardware first to preserve fast turn-around.
+        encoder = str(profile.get("encoder", "")).lower()
+        if "videotoolbox" in encoder:
+            if profile_key != "broadcast_h264_hw":
+                logger.warning(
+                    "⚠️ Hardware encode failed for %s (%s). Retrying with broadcast_h264_hw.",
+                    stem,
+                    profile.get("encoder"),
+                )
+                return publish(
+                    video_path,
+                    srt_path,
+                    subtitle_style=subtitle_style,
+                    delivery_profile="broadcast_h264_hw",
+                )
+
+            if allow_software_fallback:
+                logger.warning(
+                    "⚠️ Hardware fallback also failed for %s. Retrying with broadcast_h264 software fallback.",
+                    stem,
+                )
+                return publish(
+                    video_path,
+                    srt_path,
+                    subtitle_style=subtitle_style,
+                    delivery_profile="broadcast_h264",
+                )
+
+            raise RuntimeError(
+                f"Hardware burn failed for {stem} (profile={profile_key}). "
+                "Software fallback is disabled; set OMEGA_BURN_ALLOW_SOFTWARE_FALLBACK=1 to allow slower CPU fallback."
+            ) from e
+
         raise e
 
 def parse_srt_to_overlay_json(srt_path, json_path):
@@ -466,7 +524,7 @@ def generate_ass_from_srt(srt_path, ass_path, style_name="RuvBox"):
             events.append(f"Dialogue: 0,{start_ass},{end_ass},{style_name},,0,0,0,,{text}")
         
     with open(ass_path, 'w', encoding='utf-8') as f:
-        f.write(ASS_HEADER + "\n")
+        f.write(_build_ass_header() + "\n")
         f.write("[Events]\n")
         f.write("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
         for event in events:

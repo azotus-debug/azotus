@@ -2,19 +2,21 @@ import datetime
 import os
 import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Optional
 
 from lock_manager import ProcessLock
 
+BASE_DIR = Path(__file__).resolve().parent
 WATCHDOG_PID_FILE = Path("/tmp/omega_watchdog.pid")
 SUPERVISOR_PID_FILE = Path("/tmp/omega_watchdog_supervisor.pid")
-SUPERVISOR_LOG_FILE = Path("logs/watchdog_supervisor.log")
-WATCHDOG_LOG_FILE = Path("logs/watchdog.log")
+SUPERVISOR_LOG_FILE = BASE_DIR / "logs" / "watchdog_supervisor.log"
+WATCHDOG_LOG_FILE = BASE_DIR / "logs" / "watchdog.log"
 
-PYTHON_BIN = os.environ.get("OMEGA_PYTHON", "python3")
-WATCHDOG_CMD = [PYTHON_BIN, "-u", "process_watchdog.py"]
+PYTHON_BIN = os.environ.get("OMEGA_PYTHON") or sys.executable
+WATCHDOG_CMD = [PYTHON_BIN, "-u", str(BASE_DIR / "process_watchdog.py")]
 
 CHECK_INTERVAL_SECONDS = 10
 RESTART_BASE_BACKOFF = 5
@@ -93,7 +95,7 @@ def _start_watchdog() -> bool:
     WATCHDOG_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     try:
         with open(WATCHDOG_LOG_FILE, "a", encoding="utf-8") as log_handle:
-            proc = subprocess.Popen(WATCHDOG_CMD, stdout=log_handle, stderr=log_handle)
+            proc = subprocess.Popen(WATCHDOG_CMD, stdout=log_handle, stderr=log_handle, cwd=str(BASE_DIR))
         WATCHDOG_PID_FILE.write_text(str(proc.pid), encoding="utf-8")
         _restart_failures += 1
         _log(

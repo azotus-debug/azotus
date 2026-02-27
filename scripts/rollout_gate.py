@@ -2,12 +2,14 @@
 import argparse
 import json
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import List, Optional
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
+PYTHON_BIN = sys.executable or "python3"
 
 
 def _run(cmd: List[str], *, cwd: Path) -> subprocess.CompletedProcess:
@@ -28,7 +30,7 @@ def _tail(text: str, lines: int = 25) -> str:
 
 
 def _build_audit_command(args: argparse.Namespace) -> List[str]:
-    cmd = ["python3", "scripts/pipeline_audit.py", "--pretty"]
+    cmd = [PYTHON_BIN, "scripts/pipeline_audit.py", "--pretty"]
     if args.audit_stale_sync_minutes is not None:
         cmd.extend(["--stale-sync-minutes", str(args.audit_stale_sync_minutes)])
     if args.audit_max_orphans is not None:
@@ -39,6 +41,10 @@ def _build_audit_command(args: argparse.Namespace) -> List[str]:
         cmd.extend(["--max-stalled-jobs", str(args.audit_max_stalled_jobs)])
     if args.audit_max_dead_jobs is not None:
         cmd.extend(["--max-dead-jobs", str(args.audit_max_dead_jobs)])
+    if args.audit_max_suspicious_active is not None:
+        cmd.extend(["--max-suspicious-active", str(args.audit_max_suspicious_active)])
+    if args.audit_max_suspicious_terminal is not None:
+        cmd.extend(["--max-suspicious-terminal", str(args.audit_max_suspicious_terminal)])
     if args.audit_breach_level:
         cmd.extend(["--breach-level", args.audit_breach_level])
     if args.audit_notify:
@@ -61,6 +67,8 @@ def main() -> int:
     parser.add_argument("--audit-max-stale-syncs", type=int, default=None)
     parser.add_argument("--audit-max-stalled-jobs", type=int, default=None)
     parser.add_argument("--audit-max-dead-jobs", type=int, default=None)
+    parser.add_argument("--audit-max-suspicious-active", type=int, default=None)
+    parser.add_argument("--audit-max-suspicious-terminal", type=int, default=None)
     parser.add_argument("--audit-breach-level", choices=["warning", "critical"], default=None)
     args = parser.parse_args()
 
@@ -75,13 +83,13 @@ def main() -> int:
         "omega_manager.py",
         "state_machine.py",
         "transition_service.py",
-        "watchdog_supervisor.py",
-        "workers/finalizer.py",
+        "workers/finalizer/__init__.py",
+        "workers/finalizer/main.py",
         "scripts/pipeline_audit.py",
         "scripts/failure_injection.py",
         "scripts/rollout_gate.py",
     ]
-    compile_cmd = ["python3", "-m", "py_compile", *compile_targets]
+    compile_cmd = [PYTHON_BIN, "-m", "py_compile", *compile_targets]
     compile_proc = _run(compile_cmd, cwd=ROOT_DIR)
     compile_status = "ok" if compile_proc.returncode == 0 else "failed"
     steps.append(
@@ -96,8 +104,23 @@ def main() -> int:
     if compile_proc.returncode != 0:
         gate_failed = True
 
+    shell_cmd = ["bash", "-n", "start_omega.sh", "stop_all.sh"]
+    shell_proc = _run(shell_cmd, cwd=ROOT_DIR)
+    shell_status = "ok" if shell_proc.returncode == 0 else "failed"
+    steps.append(
+        {
+            "name": "shell_syntax",
+            "status": shell_status,
+            "code": shell_proc.returncode,
+            "cmd": " ".join(shell_cmd),
+            "output_tail": _tail((shell_proc.stdout or "") + "\n" + (shell_proc.stderr or "")),
+        }
+    )
+    if shell_proc.returncode != 0:
+        gate_failed = True
+
     if not args.skip_tests:
-        tests_cmd = ["python3", "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"]
+        tests_cmd = [PYTHON_BIN, "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"]
         tests_proc = _run(tests_cmd, cwd=ROOT_DIR)
         tests_status = "ok" if tests_proc.returncode == 0 else "failed"
         steps.append(
@@ -114,7 +137,7 @@ def main() -> int:
     else:
         steps.append({"name": "unit_tests", "status": "skipped", "code": None, "cmd": None, "output_tail": ""})
 
-    failure_injection_cmd = ["python3", "scripts/failure_injection.py"]
+    failure_injection_cmd = [PYTHON_BIN, "scripts/failure_injection.py"]
     fi_proc = _run(failure_injection_cmd, cwd=ROOT_DIR)
     fi_status = "ok" if fi_proc.returncode == 0 else "failed"
     steps.append(

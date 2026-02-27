@@ -4,6 +4,7 @@ import fcntl
 import atexit
 import signal
 import time
+import subprocess
 from pathlib import Path
 
 class ProcessLock:
@@ -76,7 +77,7 @@ class ProcessLock:
             print(f"⚠️ Failed to kill existing process: {e}")
 
     def is_lock_stale(self):
-        """Checks if the lock is held by a dead process."""
+        """Checks if the lock is held by a dead or unrelated process."""
         try:
             self.fp.seek(0)
             content = self.fp.read().strip()
@@ -86,11 +87,35 @@ class ProcessLock:
             pid = int(content)
             try:
                 os.kill(pid, 0) # Check if process exists
-                return False # Process is alive
+                # PID reuse can make a stale lock look alive.
+                return not self._pid_matches_lock_name(pid)
             except OSError:
                 return True # Process is dead
         except Exception:
             return True # Read error, assume stale
+
+    def _pid_matches_lock_name(self, pid: int) -> bool:
+        """Best-effort guard against PID reuse with stale lock files."""
+        try:
+            proc = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "command="],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            cmd = (proc.stdout or "").strip().lower()
+        except Exception:
+            return False
+
+        if not cmd:
+            return False
+
+        name = self.name.lower()
+        tokens = {name}
+        if name.startswith("omega_"):
+            tokens.add(name.replace("omega_", "", 1))
+        tokens.update(part for part in name.split("_") if len(part) >= 4)
+        return any(token and token in cmd for token in tokens)
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.cleanup()

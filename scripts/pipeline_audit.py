@@ -13,6 +13,10 @@ if str(ROOT_DIR) not in sys.path:
 
 import config
 import omega_db
+from workers.text_sanitizer import detect_likely_t_escape_corruption
+
+
+TERMINAL_STAGES = {"COMPLETED", "COMPLETE", "DELIVERED", "FAILED", "DEAD"}
 
 
 def _env_threshold(name: str) -> Optional[int]:
@@ -157,18 +161,83 @@ def _find_dead_jobs(limit: int = 25) -> Dict[str, Any]:
     return {"count": len(jobs), "samples": dead}
 
 
+def _find_suspicious_approved_payloads(limit: int = 50) -> Dict[str, Any]:
+    scanned = 0
+    suspicious: List[Dict[str, Any]] = []
+    approved_dir = Path(config.TRANSLATED_DONE_DIR)
+    if not approved_dir.exists():
+        return {
+            "scanned": 0,
+            "suspicious_total": 0,
+            "suspicious_active": 0,
+            "suspicious_terminal": 0,
+            "samples": [],
+        }
+
+    for approved_path in sorted(approved_dir.glob("*_APPROVED.json")):
+        scanned += 1
+        if _is_hidden(approved_path):
+            continue
+        try:
+            payload = json.loads(approved_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        segments = payload.get("segments", []) if isinstance(payload, dict) else payload
+        if not isinstance(segments, list):
+            continue
+
+        job_id = approved_path.name.replace("_APPROVED.json", "")
+        job = omega_db.get_job_via_track(job_id) or {}
+        target_language = str(job.get("target_language") or "is").strip().lower() or "is"
+        integrity = detect_likely_t_escape_corruption(
+            segments,
+            target_language=target_language,
+        )
+        if not integrity.get("suspicious"):
+            continue
+
+        stage = str(job.get("stage") or "")
+        stage_upper = stage.upper()
+        row = {
+            "job_id": job_id,
+            "stage": stage,
+            "status": str(job.get("status") or ""),
+            "target_language": target_language,
+            "path": str(approved_path),
+            "t_ratio": round(float((integrity.get("text") or {}).get("t_ratio") or 0.0), 6),
+            "letters": int((integrity.get("text") or {}).get("letter_count") or 0),
+            "reason": str(integrity.get("reason") or ""),
+            "is_active": stage_upper not in TERMINAL_STAGES,
+        }
+        suspicious.append(row)
+
+    suspicious_active = sum(1 for row in suspicious if row.get("is_active"))
+    suspicious_terminal = len(suspicious) - suspicious_active
+    return {
+        "scanned": scanned,
+        "suspicious_total": len(suspicious),
+        "suspicious_active": suspicious_active,
+        "suspicious_terminal": suspicious_terminal,
+        "samples": suspicious[:limit],
+    }
+
+
 def _apply_thresholds(report: Dict[str, Any], thresholds: Dict[str, Optional[int]], breach_level: str) -> None:
     checks = report.get("checks", {})
     orphan_count = len(((checks.get("orphan_deliveries") or {}).get("orphans") or []))
     stale_sync_count = len(((checks.get("sync_states") or {}).get("stale") or []))
     stalled_count = len(((checks.get("stalled_jobs") or {}).get("stalled") or []))
     dead_count = int((checks.get("dead_jobs") or {}).get("count") or 0)
+    suspicious_active = int((checks.get("approved_text_integrity") or {}).get("suspicious_active") or 0)
+    suspicious_terminal = int((checks.get("approved_text_integrity") or {}).get("suspicious_terminal") or 0)
 
     breaches = []
     max_orphans = thresholds.get("max_orphans")
     max_stale_syncs = thresholds.get("max_stale_syncs")
     max_stalled_jobs = thresholds.get("max_stalled_jobs")
     max_dead_jobs = thresholds.get("max_dead_jobs")
+    max_suspicious_active = thresholds.get("max_suspicious_active")
+    max_suspicious_terminal = thresholds.get("max_suspicious_terminal")
 
     if max_orphans is not None and orphan_count > max_orphans:
         breaches.append(f"orphan_deliveries={orphan_count} > max_orphans={max_orphans}")
@@ -178,6 +247,14 @@ def _apply_thresholds(report: Dict[str, Any], thresholds: Dict[str, Optional[int
         breaches.append(f"stalled_jobs={stalled_count} > max_stalled_jobs={max_stalled_jobs}")
     if max_dead_jobs is not None and dead_count > max_dead_jobs:
         breaches.append(f"dead_jobs={dead_count} > max_dead_jobs={max_dead_jobs}")
+    if max_suspicious_active is not None and suspicious_active > max_suspicious_active:
+        breaches.append(
+            f"suspicious_active={suspicious_active} > max_suspicious_active={max_suspicious_active}"
+        )
+    if max_suspicious_terminal is not None and suspicious_terminal > max_suspicious_terminal:
+        breaches.append(
+            f"suspicious_terminal={suspicious_terminal} > max_suspicious_terminal={max_suspicious_terminal}"
+        )
 
     checks["thresholds"] = {
         **thresholds,
@@ -268,6 +345,16 @@ def run_audit(
     except Exception as exc:
         report["critical"].append(f"Dead-job check failed: {exc}")
 
+    try:
+        integrity = _find_suspicious_approved_payloads()
+        report["checks"]["approved_text_integrity"] = integrity
+        if int(integrity.get("suspicious_active") or 0) > 0:
+            report["critical"].append(
+                f"Found {integrity['suspicious_active']} suspicious approved payload(s) on non-terminal jobs"
+            )
+    except Exception as exc:
+        report["critical"].append(f"Approved-text integrity check failed: {exc}")
+
     _apply_thresholds(report, thresholds=thresholds, breach_level=breach_level)
 
     if report["critical"]:
@@ -327,6 +414,18 @@ def main() -> int:
         help="Maximum allowed DEAD jobs before threshold breach (default: disabled).",
     )
     parser.add_argument(
+        "--max-suspicious-active",
+        type=int,
+        default=_env_threshold("OMEGA_AUDIT_MAX_SUSPICIOUS_ACTIVE"),
+        help="Maximum allowed suspicious approved payloads on non-terminal jobs (default: disabled).",
+    )
+    parser.add_argument(
+        "--max-suspicious-terminal",
+        type=int,
+        default=_env_threshold("OMEGA_AUDIT_MAX_SUSPICIOUS_TERMINAL"),
+        help="Maximum allowed suspicious approved payloads on terminal jobs (default: disabled).",
+    )
+    parser.add_argument(
         "--breach-level",
         choices=["warning", "critical"],
         default=str(os.environ.get("OMEGA_AUDIT_BREACH_LEVEL", "warning")).strip().lower() or "warning",
@@ -344,6 +443,12 @@ def main() -> int:
         "max_stale_syncs": (None if args.max_stale_syncs is None else max(0, int(args.max_stale_syncs))),
         "max_stalled_jobs": (None if args.max_stalled_jobs is None else max(0, int(args.max_stalled_jobs))),
         "max_dead_jobs": (None if args.max_dead_jobs is None else max(0, int(args.max_dead_jobs))),
+        "max_suspicious_active": (
+            None if args.max_suspicious_active is None else max(0, int(args.max_suspicious_active))
+        ),
+        "max_suspicious_terminal": (
+            None if args.max_suspicious_terminal is None else max(0, int(args.max_suspicious_terminal))
+        ),
     }
     report = run_audit(
         stale_sync_minutes=max(1, int(args.stale_sync_minutes)),

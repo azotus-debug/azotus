@@ -281,7 +281,7 @@ def init_pg_schema(conn):
             meta TEXT,
             target_language TEXT DEFAULT 'is',
             program_profile TEXT DEFAULT 'standard',
-            subtitle_style TEXT DEFAULT 'Classic',
+            subtitle_style TEXT DEFAULT 'RUV_BOX',
             editor_report TEXT,
             client TEXT DEFAULT 'unknown',
             due_date DATE,
@@ -330,7 +330,7 @@ def init_pg_schema(conn):
             duration_seconds REAL,
             client TEXT,
             due_date TEXT,
-            default_style TEXT DEFAULT 'Classic',
+            default_style TEXT DEFAULT 'RUV_BOX',
             status TEXT DEFAULT 'ACTIVE',
             deleted_at TIMESTAMP,
             deleted_original_filename TEXT,
@@ -616,6 +616,18 @@ def init_pg_schema(conn):
     add_column_if_missing('jobs', 'finalizer_ran_at', 'TIMESTAMP')
     add_column_if_missing('jobs', 'skeleton_path', 'TEXT')
     add_column_if_missing('jobs', 'transcript_version', 'INTEGER', '1')
+    # Keep style defaults aligned with runtime contract.
+    try:
+        c.execute("ALTER TABLE jobs ALTER COLUMN subtitle_style SET DEFAULT 'RUV_BOX'")
+    except Exception:
+        pass
+    try:
+        c.execute(
+            "UPDATE jobs SET subtitle_style = 'RUV_BOX' "
+            "WHERE subtitle_style IS NULL OR subtitle_style IN ('Classic', 'RuvBox', '')"
+        )
+    except Exception:
+        pass
 
     # Tracks table - missing columns
     add_column_if_missing('tracks', 'claimed_by', 'TEXT')
@@ -623,6 +635,17 @@ def init_pg_schema(conn):
     add_column_if_missing('tracks', 'review_deadline', 'TIMESTAMP')
     add_column_if_missing('tracks', 'cloud_job_id', 'TEXT')
     add_column_if_missing('tracks', 'cloud_job_triggered_at', 'TIMESTAMP')
+    try:
+        c.execute("ALTER TABLE programs ALTER COLUMN default_style SET DEFAULT 'RUV_BOX'")
+    except Exception:
+        pass
+    try:
+        c.execute(
+            "UPDATE programs SET default_style = 'RUV_BOX' "
+            "WHERE default_style IS NULL OR default_style IN ('Classic', 'RuvBox', '')"
+        )
+    except Exception:
+        pass
 
     # COMMIT IS HANDLED BY CALLER (usually) but harmless to commit DDL
     conn.commit()
@@ -687,7 +710,7 @@ def _job_dict_from_track_row(row):
         track_meta.get("subtitle_style")
         or program_meta.get("subtitle_style")
         or row.get("default_style")
-        or "Classic"
+        or "RUV_BOX"
     )
     editor_report = track_meta.get("editor_report") or program_meta.get("editor_report")
     client = row.get("client") or program_meta.get("client") or "unknown"
@@ -975,8 +998,8 @@ def update_job_via_track(
         c = conn.cursor()
         _increment_version(c)
         conn.commit()
-    except Exception:
-        pass
+    except Exception as e:
+        logging.getLogger("omega_db").warning(f"Version increment failed (dashboard may miss update): {e}")
     finally:
         try:
             conn.close()
@@ -1032,8 +1055,7 @@ def delete_job(file_stem):
     if not file_stem or len(file_stem) < 2:
         print("DEBUG: file_stem too short")
         return
-        return
-    
+
     # 1. Database Cleanup
     try:
         conn = _connect()
@@ -1052,14 +1074,35 @@ def delete_job(file_stem):
         )
         program_rows = c.fetchall()
         print(f"DEBUG: Found {len(program_rows)} programs to delete")
-        
+
         for row in program_rows:
             try:
                 p_id = row['id']
-                
-                # Delete tracks first
+
+                # Find track IDs for child table cleanup
+                c.execute("SELECT id FROM tracks WHERE program_id=?", (p_id,))
+                track_ids = [r['id'] if isinstance(r, dict) else r[0] for r in c.fetchall()]
+
+                # Delete child tables first (foreign key safety)
+                for tid in track_ids:
+                    try:
+                        c.execute("DELETE FROM track_deliveries WHERE track_id=?", (tid,))
+                    except Exception:
+                        pass
+                    try:
+                        c.execute("DELETE FROM script_edits WHERE track_id=?", (tid,))
+                    except Exception:
+                        pass
+
+                # Delete deliveries by job stem
+                try:
+                    c.execute("DELETE FROM deliveries WHERE job_stem=?", (file_stem,))
+                except Exception:
+                    pass
+
+                # Delete tracks
                 c.execute("DELETE FROM tracks WHERE program_id=?", (p_id,))
-                
+
                 # Delete master scripts (orphan prevention)
                 try:
                     c.execute("DELETE FROM master_scripts WHERE program_id=?", (p_id,))
@@ -1068,7 +1111,7 @@ def delete_job(file_stem):
 
                 # Delete programs
                 c.execute("DELETE FROM programs WHERE id=?", (p_id,))
-                
+
             except Exception as e:
                 print(f"Error checking program deletion for row {row}: {e}")
             
@@ -1276,7 +1319,7 @@ def create_program(
     duration_seconds: float = None,
     client: str = None,
     due_date: str = None,
-    default_style: str = 'Classic',
+    default_style: str = 'RUV_BOX',
     meta: dict = None
 ) -> str:
     """Create a new program. Returns program ID."""
@@ -1629,34 +1672,163 @@ def get_tracks_for_program(program_id: str) -> list:
 
 
 def update_track(track_id: str, **kwargs) -> bool:
-    """Update track fields."""
+    """Update track fields.
+
+    Meta merging is done atomically within a single transaction to prevent
+    race conditions between omega_manager and cloud_sync_service.
+    """
     if not kwargs:
         return False
     ensure_schema()
-    
-    # Handle meta specially
-    if 'meta' in kwargs and isinstance(kwargs['meta'], dict):
-        existing = get_track(track_id)
-        if existing:
-            existing_meta = existing.get('meta', {}) or {}
-            existing_meta.update(kwargs['meta'])
-            kwargs['meta'] = json.dumps(existing_meta)
-    
+
     kwargs['updated_at'] = datetime.now().isoformat()
-    
-    set_clause = ', '.join(f"{k}=?" for k in kwargs.keys())
-    values = list(kwargs.values()) + [track_id]
-    
+
     conn = _connect()
     c = conn.cursor()
     try:
+        # Handle meta merge atomically using SELECT ... FOR UPDATE
+        # to acquire a row-level lock before reading, preventing
+        # concurrent read-modify-write races between manager and cloud_sync.
+        if 'meta' in kwargs and isinstance(kwargs['meta'], dict):
+            c.execute("SELECT meta FROM tracks WHERE id=? FOR UPDATE", (track_id,))
+            row = c.fetchone()
+            if row:
+                raw = row["meta"] if isinstance(row, dict) else row[0]
+                existing_meta = json.loads(raw) if isinstance(raw, str) else (raw or {})
+                existing_meta.update(kwargs['meta'])
+                kwargs['meta'] = json.dumps(existing_meta)
+            else:
+                kwargs['meta'] = json.dumps(kwargs['meta'])
+
+        set_clause = ', '.join(f"{k}=?" for k in kwargs.keys())
+        values = list(kwargs.values()) + [track_id]
         c.execute(f"UPDATE tracks SET {set_clause} WHERE id=?", values)
         conn.commit()
         success = c.rowcount > 0
+        
+        # --- WORLD CLASS ARCHITECTURE HOOK ---
+        if success:
+            try:
+                from realtime_bridge import broadcast_track_update
+                # We fetch the latest full state of the track to broadcast
+                # (in a real system we'd just broadcast the diff to save bytes, but this guarantees consistency)
+                c.execute("SELECT * FROM tracks WHERE id=?", (track_id,))
+                updated_row = c.fetchone()
+                if updated_row:
+                    payload = dict(updated_row)
+                    # Handle json meta parsing before broadcast
+                    if payload.get('meta') and isinstance(payload['meta'], str):
+                        try:
+                            payload['meta'] = json.loads(payload['meta'])
+                        except:
+                            payload['meta'] = {}
+                    broadcast_track_update(track_id, payload)
+            except Exception as e:
+                logger.error(f"Failed to push real-time event for track {track_id}: {e}")
+                
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
     finally:
         conn.close()
-    
+
     return success
+
+
+def reset_job(file_stem: str, target_stage: str = "TRANSCRIBED") -> bool:
+    """
+    Cleanly reset a job to a target stage, removing ALL downstream artifacts.
+
+    This prevents stale files (GCS approved.json, local SRTs, old burned videos)
+    from hijacking the pipeline on re-runs.
+
+    Args:
+        file_stem: The job's file_stem (e.g. "i2610_intluk_h264-1080p25-aac-...")
+        target_stage: Stage to reset to (default: TRANSCRIBED)
+
+    Returns:
+        True if reset succeeded
+    """
+    from gcs_jobs import GcsJobPaths
+    from google.cloud import storage as gcs_storage
+
+    job = get_job_via_track(file_stem)
+    if not job:
+        logger.error(f"reset_job: No job found for stem {file_stem}")
+        return False
+
+    track_id = job.get("track_id")
+    stem = file_stem
+    cleaned = []
+
+    # 1. Delete GCS artifacts if resetting before TRANSLATED
+    if target_stage in ("TRANSCRIBED", "QUEUED", "INGEST"):
+        try:
+            bucket_name = config.OMEGA_JOBS_BUCKET
+            prefix = config.OMEGA_JOBS_PREFIX
+            job_id = job.get("job_id") or stem
+            paths = GcsJobPaths(bucket=bucket_name, prefix=prefix, job_id=job_id)
+
+            client = gcs_storage.Client(project=config.OMEGA_CLOUD_PROJECT)
+            bucket = client.bucket(bucket_name)
+            for blob_path in [paths.approved_json(), paths.progress_json()]:
+                blob = bucket.blob(blob_path)
+                if blob.exists():
+                    blob.delete()
+                    cleaned.append(f"gcs:{blob_path}")
+        except Exception as e:
+            logger.warning(f"reset_job: GCS cleanup error (non-fatal): {e}")
+
+    # 2. Delete local artifacts
+    local_files = [
+        config.TRANSLATED_DONE_DIR / f"{stem}_APPROVED.json",
+        config.SRT_DIR / f"DONE_{stem}.srt",
+        config.SRT_DIR / f"{stem}.srt",
+        config.SRT_DIR / f"{stem}.vtt",
+        config.SRT_DIR / f"{stem}.ttml",
+        config.SRT_DIR / f"{stem}_normalized.json",
+        config.VAULT_DATA / f"{stem}.ass",
+    ]
+    for f in local_files:
+        try:
+            if f.exists():
+                f.unlink()
+                cleaned.append(str(f.name))
+        except Exception as e:
+            logger.warning(f"reset_job: Could not delete {f}: {e}")
+
+    # 3. Rename (not delete) old burned video if it exists
+    video_dir = config.BASE_DIR / "4_DELIVERY" / "VIDEO"
+    video_path = video_dir / f"{stem}_SUBBED.mp4"
+    try:
+        if video_path.exists():
+            archive_name = f"{stem}_SUBBED.old_{int(time.time())}.mp4"
+            video_path.rename(video_dir / archive_name)
+            cleaned.append(f"video→{archive_name}")
+    except Exception as e:
+        logger.warning(f"reset_job: Could not rename video: {e}")
+
+    # 4. Reset DB: stage + clear stale execution metadata + clear halted flag
+    update_track(track_id,
+        stage=target_stage,
+        status=f"Reset to {target_stage}",
+        meta={
+            "cloud_run_execution": None,
+            "cloud_triggered_at": None,
+            "cloud_progress": None,
+            "burn_started_at": None,
+            "halted": False,
+            "stall_restart_count": 0,
+            "reset_at": datetime.now().isoformat(),
+            "reset_cleaned": cleaned,
+        }
+    )
+
+    logger.info(f"reset_job: {stem} → {target_stage} (cleaned: {', '.join(cleaned) or 'nothing'})")
+    return True
 
 
 @db_retry()
@@ -3464,7 +3636,7 @@ def delete_dropzone_recipe(recipe_id: str) -> bool:
 # Default settings — used when no override exists in the DB.
 _DEFAULT_APP_SETTINGS = {
     "default_target_language": "is",
-    "default_subtitle_style": "Classic",
+    "default_subtitle_style": "RUV_BOX",
     "auto_burn_on_finalize": True,
     "cloud_translation_enabled": True,
     "cloud_region": "us-central1",

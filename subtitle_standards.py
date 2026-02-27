@@ -59,11 +59,46 @@ MERGE_MAX_DURATION = 6.5    # Don't merge if result exceeds this (seconds)
 MERGE_CPS_TRIGGER = 18.0    # Merge if CPS exceeds this
 MERGE_SHORT_TRIGGER = 1.2   # Merge if duration below this (seconds)
 
+# --- SPEECH ANCHORING (BBC/Netflix timing rules) ---
+# These constants implement published broadcast standards for when subtitles appear/disappear
+ANTICIPATION_MS = 200          # Netflix: subtitle may appear up to 200ms before first word
+MAX_ANTICIPATION_S = 1.5       # BBC: never more than 1.5s before speech
+MAX_HANG_S = 1.5               # BBC: never more than 1.5s after last word
+MIN_HANG_S = 0.3               # BBC: minimum 0.3s after last word for eye adjustment
+BBC_PER_WORD_S = 0.3           # BBC: 0.3 seconds per word minimum display time
+NETFLIX_MIN_DURATION = 0.833   # Netflix: 5/6 second absolute floor
+
 # --- SCENE DETECTION ---
 # For speech-aware scene snapping
 SCENE_THRESHOLD = 0.3       # FFmpeg scene detection threshold (0.0-1.0)
 SCENE_SNAP_WINDOW = 0.5     # Snap if cut is within this many seconds of subtitle boundary
+SCENE_SNAP_FRAMES = 11      # Netflix: snap if cut within 11 frames of subtitle boundary
 SPEECH_GAP_THRESHOLD = 0.3  # Minimum speech gap to allow scene snap (seconds)
+
+# --- CPS REBALANCING ---
+# When consecutive subtitles have wildly different CPS, redistribute text
+MIN_READABLE_CPS = 5.0        # Below this = text sitting too long, viewer gets bored
+REBALANCE_CPS_RATIO = 3.0     # If max/min CPS ratio > this within a cluster, rebalance
+REBALANCE_CLUSTER_GAP = 0.5   # Max gap (seconds) between segments to consider them a cluster
+
+# --- PRE-SEGMENTATION ---
+# Split transcription segments into subtitle-sized chunks BEFORE translation
+TARGET_BLOCK_DURATION = 4.5   # Ideal subtitle duration (seconds)
+MIN_BLOCK_DURATION = 2.0      # Never create a chunk shorter than this
+MAX_BLOCK_DURATION = MAX_DURATION  # 7.0s ceiling
+
+# Language expansion ratios (English → target)
+# Used to estimate how many subtitle blocks a long segment needs
+EXPANSION_RATIOS: Dict[str, float] = {
+    "is": 1.1,   # Icelandic: compound words inflate character count
+    "nl": 1.05,  # Dutch: compound words
+    "de": 1.15,  # German: long compound words
+    "es": 1.1,   # Spanish: slightly longer
+    "fr": 1.15,  # French: articles/prepositions add length
+    "pt": 1.1,   # Portuguese: similar to Spanish
+    "it": 1.05,  # Italian: close to English length
+}
+DEFAULT_EXPANSION_RATIO = 1.0
 
 # --- CONTEXT ---
 CONTEXT_GAP_MAX = 3.0
@@ -107,22 +142,22 @@ def build_constraint_items(
     source_segments: list[dict],
     translated_segments: list[dict],
 ) -> list[dict]:
-    trans_map: Dict[int, str] = {}
+    trans_map: Dict[str, str] = {}
     for seg in translated_segments or []:
-        try:
-            seg_id = int(seg.get("id"))
-        except Exception:
+        seg_id = seg.get("id")
+        if seg_id is None:
             continue
+        seg_id = str(seg_id)
         text = str(seg.get("text") or "").strip()
         if text:
             trans_map[seg_id] = text
 
     items: list[dict] = []
     for idx, seg in enumerate(source_segments or []):
-        try:
-            seg_id = int(seg.get("id"))
-        except Exception:
+        seg_id = seg.get("id")
+        if seg_id is None:
             continue
+        seg_id = str(seg_id)
         start = float(seg.get("start") or 0.0)
         end = float(seg.get("end") or start)
         duration = max(0.0, end - start)
@@ -170,12 +205,12 @@ def build_priority_context(
     include_tight: bool = True,
 ) -> list[dict]:
     items = build_constraint_items(source_segments, translated_segments)
-    trans_map: Dict[int, str] = {}
+    trans_map: Dict[str, str] = {}
     for seg in translated_segments or []:
-        try:
-            seg_id = int(seg.get("id"))
-        except Exception:
+        seg_id = seg.get("id")
+        if seg_id is None:
             continue
+        seg_id = str(seg_id)
         trans_map[seg_id] = str(seg.get("text") or "").strip()
 
     priority = []
@@ -210,7 +245,7 @@ def build_priority_context(
             prev_seg = source_segments[idx - 1]
             prev_end = float(prev_seg.get("end") or 0.0)
             if start - prev_end <= CONTEXT_GAP_MAX:
-                prev_id = int(prev_seg.get("id"))
+                prev_id = str(prev_seg.get("id"))
                 prev_ctx = {
                     "id": prev_id,
                     "src": str(prev_seg.get("text") or "").strip(),
@@ -221,7 +256,7 @@ def build_priority_context(
             next_seg = source_segments[idx + 1]
             next_start = float(next_seg.get("start") or 0.0)
             if next_start - end <= CONTEXT_GAP_MAX:
-                next_id = int(next_seg.get("id"))
+                next_id = str(next_seg.get("id"))
                 next_ctx = {
                     "id": next_id,
                     "src": str(next_seg.get("text") or "").strip(),
