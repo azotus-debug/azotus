@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Badge from "@/components/common/Badge";
 import Button from "@/components/common/Button";
@@ -10,7 +10,7 @@ import ProgressBar from "@/components/common/ProgressBar";
 import TrackDetailPanel from "@/components/common/TrackDetailPanel";
 import { useNavigation } from "@/store/navigation";
 import { useProgramsStore, Track } from "@/store/programs";
-import { useSSEContext } from "@/components/SSEProvider";
+import { useRealtime } from "@/contexts/RealtimeContext";
 
 interface Props {
   programId: string;
@@ -25,11 +25,6 @@ interface MasterSummary {
 }
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
-
-const WAVEFORM_BARS = [
-  18, 32, 26, 40, 22, 36, 28, 48, 22, 30, 44, 20, 52, 28, 40, 24, 36, 30, 46, 22, 34, 26,
-  42, 20, 36, 28, 48, 24, 38, 22, 44, 28, 40, 20,
-];
 
 const FLAG_MAP: Record<string, string> = {
   is: "🇮🇸",
@@ -181,10 +176,10 @@ export default function ProgramDetailView({ programId }: Props) {
   const [notifyEmail, setNotifyEmail] = useState("");
   const [notifyLink, setNotifyLink] = useState("");
 
-  const { subscribe } = useSSEContext();
+  const { socket, isConnected } = useRealtime();
 
   const program = programs.find((p) => p.id === programId);
-  const tracks = program?.tracks || [];
+  const tracks = useMemo(() => program?.tracks ?? [], [program?.tracks]);
 
   useEffect(() => {
     if (!program) {
@@ -192,15 +187,23 @@ export default function ProgramDetailView({ programId }: Props) {
     }
   }, [program, fetchPrograms]);
 
-  // SSE subscriptions for real-time updates
+  // Real-time WebSocket subscriptions
   useEffect(() => {
-    const unsubs = [
-      subscribe("programs_updated", () => fetchPrograms()),
-      subscribe("tracks_updated", () => fetchPrograms()),
-      subscribe("track_progress", () => fetchPrograms()),
-    ];
-    return () => unsubs.forEach(fn => fn());
-  }, [subscribe, fetchPrograms]);
+    if (!socket || !isConnected) return;
+
+    const handleUpdate = (data: unknown) => {
+      console.log('Realtime track update received:', data);
+      fetchPrograms(); // For now, we just trigger a refetch of the store. Next step is optimistic updates.
+    };
+
+    socket.on('track_updated', handleUpdate);
+
+    // If we wanted to scope, we could emit subscribe_to_program here
+
+    return () => {
+      socket.off('track_updated', handleUpdate);
+    };
+  }, [socket, isConnected, fetchPrograms]);
 
   useEffect(() => {
     if (!tracks.length) return;
@@ -297,11 +300,6 @@ export default function ProgramDetailView({ programId }: Props) {
     stripExtension(program.original_filename) ||
     program.id;
 
-  const actionQueue = [
-    ...reviewTargets.map((track) => ({ track, action: "review" as const, label: "Send to Reviewer" })),
-    ...approvalTargets.map((track) => ({ track, action: "approve" as const, label: "Approve Burn" })),
-  ];
-
   const streamId = stripExtension(program.original_filename) || program.id;
   const posterUrl = program.thumbnail_path ? `${API_BASE}/api/v2/thumbnails/${program.id}` : undefined;
 
@@ -339,242 +337,185 @@ export default function ProgramDetailView({ programId }: Props) {
           </Button>
         </header>
 
-        <div className="detail-content">
-          <section className="detail-main">
-            <div className="detail-panel">
-              <div className="panel-header">
+        <div className="detail-content" style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
+
+          {/* Top Context Header Area */}
+          <section className="context-header" style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.2fr) minmax(0, 2fr)", gap: "24px", alignItems: "stretch" }}>
+
+            {/* Left: Compact Video Preview */}
+            <div className="detail-panel" style={{ display: "flex", flexDirection: "column" }}>
+              <div className="panel-header" style={{ marginBottom: "8px" }}>
                 <div>
                   <div className="panel-title">Source Preview</div>
-                  <div className="panel-subtitle">{program.original_filename || "Program Source"}</div>
                 </div>
                 <Badge label={attentionLabel} variant={attentionVariant} />
               </div>
-              <div className="media-shell">
+              <div className="media-shell" style={{ flex: 1, minHeight: "200px" }}>
                 {program.video_path ? (
                   <video
                     className="video-preview"
                     src={`${API_BASE}/api/stream/${streamId}`}
                     controls
                     poster={posterUrl}
+                    style={{ height: "100%", width: "100%", objectFit: "cover", borderRadius: "8px" }}
                   />
                 ) : (
-                  <div className="video-preview-placeholder">
-                    <span style={{ fontSize: "32px" }}>Preview</span>
-                    <div>No video attached</div>
+                  <div className="video-preview-placeholder" style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+                    <span style={{ fontSize: "24px" }}>Preview</span>
+                    <div style={{ fontSize: "12px" }}>No video attached</div>
                   </div>
                 )}
               </div>
             </div>
 
-            <div className="detail-panel timeline-panel">
-              <div className="panel-header">
-                <div>
-                  <div className="panel-title">Timeline</div>
-                  <div className="panel-subtitle">Progress {progressPercent}%</div>
-                </div>
-                <div className="panel-subtitle">{formatDuration(program.duration_seconds)}</div>
-              </div>
-              <div className="timeline-track">
-                <div className="timeline-progress" style={{ width: `${progressPercent}%` }} />
-              </div>
-              <div className="waveform">
-                {WAVEFORM_BARS.map((height, index) => (
-                  <span key={`${height}-${index}`} className="waveform-bar" style={{ height: `${height}%` }} />
-                ))}
-              </div>
-              <div className="timeline-meta">
-                <span>
-                  {completedCount}/{tracks.length} delivered
-                </span>
-                <span>Avg progress {progressPercent}%</span>
-              </div>
-            </div>
+            {/* Right: Program Context & Command Center */}
+            <div className="detail-panel" style={{ display: "flex", flexDirection: "column", justifyContent: "space-between" }}>
 
-            <div className="detail-panel">
-              <div className="panel-title" style={{ marginBottom: "12px" }}>
-                Program Details
+              <div>
+                <div className="panel-header" style={{ marginBottom: "16px" }}>
+                  <div>
+                    <div className="panel-title">Program Info</div>
+                    <div className="panel-subtitle">Duration: {formatDuration(program.duration_seconds)}</div>
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    <div className="text-sm font-semibold">{completedCount} / {tracks.length}</div>
+                    <div className="text-xs text-muted">Tracks Delivered</div>
+                  </div>
+                </div>
+
+                <div className="info-grid" style={{ gridTemplateColumns: "repeat(3, 1fr)", gap: "16px" }}>
+                  <div className="info-cell">
+                    <span className="info-label">Client</span>
+                    <span className="truncate">{program.client && program.client !== "unknown" ? program.client : extractClientFromPath(program.video_path) || "—"}</span>
+                  </div>
+                  <div className="info-cell">
+                    <span className="info-label">Due Date</span>
+                    <span className="truncate">{program.due_date || "—"}</span>
+                  </div>
+                  <div className="info-cell">
+                    <span className="info-label">Style</span>
+                    <span className="truncate">{program.default_style || "Classic"}</span>
+                  </div>
+                </div>
+
+                <div className="mt-6 mb-4">
+                  <div className="flex justify-between text-xs text-muted mb-2">
+                    <span>Overall Pipeline Progress</span>
+                    <span>{progressPercent}%</span>
+                  </div>
+                  <div className="progress-track w-full">
+                    <div className="progress-fill" style={{ width: `${progressPercent}%` }} />
+                  </div>
+                </div>
               </div>
-              <div className="info-grid">
-                <div className="info-cell">
-                  <span className="info-label">Client</span>
-                  <span>{program.client && program.client !== "unknown"
-                    ? program.client
-                    : extractClientFromPath(program.video_path) || "—"}</span>
-                </div>
-                <div className="info-cell">
-                  <span className="info-label">Duration</span>
-                  <span>{formatDuration(program.duration_seconds)}</span>
-                </div>
-                <div className="info-cell">
-                  <span className="info-label">Due Date</span>
-                  <span>{program.due_date || "—"}</span>
-                </div>
-                <div className="info-cell">
-                  <span className="info-label">Style</span>
-                  <span>{program.default_style || "Classic"}</span>
-                </div>
-                <div className="info-cell">
-                  <span className="info-label">Tracks</span>
-                  <span>{completedCount} delivered of {tracks.length}</span>
-                </div>
-                <div className="info-cell">
-                  <span className="info-label">Updated</span>
-                  <span>{new Date(program.updated_at).toLocaleString()}</span>
-                </div>
+
+              {/* Command Center Action Stack inside Info Panel */}
+              <div className="action-stack" style={{ display: "flex", gap: "12px", marginTop: "16px" }}>
+                <Button variant="primary" onClick={handleOpenEditor} disabled={!editorTarget}>
+                  Open Editor
+                </Button>
+                {primaryReview && (
+                  <Button
+                    variant="secondary"
+                    onClick={() => handleSendToReview(primaryReview.id)}
+                    disabled={actionBusy === primaryReview.id}
+                  >
+                    Send to Reviewer
+                  </Button>
+                )}
+                {primaryApproval && (
+                  <Button
+                    variant="ghost"
+                    onClick={() => handleApprove(primaryApproval.id)}
+                    disabled={actionBusy === primaryApproval.id}
+                  >
+                    Approve Burn
+                  </Button>
+                )}
               </div>
             </div>
           </section>
 
-          <aside className="detail-side">
-            <div className="detail-panel action-panel">
-              <div className="panel-header">
-                <div>
-                  <div className="panel-title">Command Center</div>
-                  <div className="panel-subtitle">Next actions and escalations</div>
-                </div>
-                <Badge label={attentionLabel} variant={attentionVariant} />
+          {/* Dominant Output Tracks Area */}
+          <section className="mt-4 pt-4" style={{ borderTop: "1px solid rgba(255,255,255,0.05)" }}>
+            <div className="flex items-center justify-between mb-5">
+              <div>
+                <div className="text-base font-medium text-gray-100 mb-1">Output Tracks</div>
+                <div className="text-sm text-muted">Manage deliverables and workflows for this program</div>
               </div>
+              <Button variant="ghost" onClick={() => setIsAddTrackOpen(true)}>
+                + Add Track
+              </Button>
+            </div>
 
-              <div className="action-stack">
-                <Button variant="primary" onClick={handleOpenEditor} disabled={!editorTarget}>
-                  Open Editor
-                </Button>
-                <Button
-                  variant="secondary"
-                  onClick={() => primaryReview && handleSendToReview(primaryReview.id)}
-                  disabled={!primaryReview || actionBusy === primaryReview.id}
-                >
-                  Send to Reviewer
-                </Button>
-                <Button
-                  variant="ghost"
-                  onClick={() => primaryApproval && handleApprove(primaryApproval.id)}
-                  disabled={!primaryApproval || actionBusy === primaryApproval.id}
-                >
-                  Approve Burn
-                </Button>
-              </div>
-
-              <div className="action-metrics">
-                <div className="metric-card">
-                  <div className="metric-label">Needs Review</div>
-                  <div className="metric-value">{reviewTargets.length}</div>
-                </div>
-                <div className="metric-card">
-                  <div className="metric-label">Awaiting Approval</div>
-                  <div className="metric-value">{approvalTargets.length}</div>
-                </div>
-                <div className="metric-card">
-                  <div className="metric-label">Blocked</div>
-                  <div className="metric-value">{failedTargets.length}</div>
-                </div>
-              </div>
-
-              <div className="action-list">
-                {actionQueue.length > 0 ? (
-                  actionQueue.map((item) => (
-                    <div key={`${item.action}-${item.track.id}`} className="action-item">
-                      <div className="action-info">
-                        <div className="action-title">{trackLabel(item.track)}</div>
-                        <div className="action-subtitle">
-                          {formatStage(item.track.stage)} • {item.track.status || "Queued"}
-                        </div>
-                      </div>
-                      <Button
-                        variant="ghost"
-                        onClick={() =>
-                          item.action === "review"
-                            ? handleSendToReview(item.track.id)
-                            : handleApprove(item.track.id)
-                        }
-                        disabled={actionBusy === item.track.id}
-                      >
-                        {item.label}
-                      </Button>
-                    </div>
-                  ))
-                ) : (
-                  <div className="empty-state">
-                    <p>No pending review or approval.</p>
-                  </div>
-                )}
+            {/* Optional Notification configuration inside Tracks container */}
+            <div className="flex flex-wrap gap-4 items-center p-3 mb-5 rounded-lg" style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "13px", minWidth: "200px" }}>
+                <input
+                  type="checkbox"
+                  checked={notifyEnabled}
+                  onChange={(e) => setNotifyEnabled(e.target.checked)}
+                  style={{ accentColor: "rgb(var(--omega-blue))" }}
+                />
+                Notify client on delivery?
+              </label>
+              <div style={{ display: "flex", gap: "12px", flex: 1 }}>
+                <input
+                  type="email"
+                  className="input flex-1"
+                  placeholder="client@example.com"
+                  value={notifyEmail}
+                  onChange={(e) => setNotifyEmail(e.target.value)}
+                  disabled={!notifyEnabled}
+                  style={{ maxWidth: "300px" }}
+                />
+                <input
+                  type="text"
+                  className="input flex-2"
+                  placeholder="https://download.link/video"
+                  value={notifyLink}
+                  onChange={(e) => setNotifyLink(e.target.value)}
+                  disabled={!notifyEnabled}
+                />
               </div>
             </div>
 
-            <div className="detail-panel">
-              <div className="panel-header" style={{ marginBottom: "6px" }}>
-                <div className="panel-title">Output Tracks</div>
-                <Button variant="ghost" onClick={() => setIsAddTrackOpen(true)}>
-                  + Add Track
-                </Button>
-              </div>
-              <div className="card" style={{ padding: "10px 12px", marginBottom: "12px", display: "flex", flexDirection: "column", gap: "8px" }}>
-                <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px" }}>
-                  <input
-                    type="checkbox"
-                    checked={notifyEnabled}
-                    onChange={(e) => setNotifyEnabled(e.target.checked)}
-                    style={{ accentColor: "rgb(var(--omega-blue))" }}
-                  />
-                  Notify client on delivery (optional)
-                </label>
-                <div style={{ display: "grid", gap: "8px", gridTemplateColumns: "minmax(160px, 1fr) minmax(200px, 2fr)" }}>
-                  <input
-                    type="email"
-                    className="input"
-                    placeholder="client@example.com"
-                    value={notifyEmail}
-                    onChange={(e) => setNotifyEmail(e.target.value)}
-                    disabled={!notifyEnabled}
-                  />
-                  <input
-                    type="text"
-                    className="input"
-                    placeholder="https://download.link/video"
-                    value={notifyLink}
-                    onChange={(e) => setNotifyLink(e.target.value)}
-                    disabled={!notifyEnabled}
-                  />
-                </div>
-                <span style={{ fontSize: "11px", color: "rgb(var(--omega-text-3))" }}>
-                  {notifyEnabled
-                    ? "Provide email + link to include in delivery notification."
-                    : "Enable to send a delivery email with the download link."}
-                </span>
-              </div>
-              <div className="tracks-section">
-                {selectedTrack ? (
+            <div className="tracks-section" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(400px, 1fr))", gap: "16px", alignItems: "start" }}>
+              {selectedTrack ? (
+                <div style={{ gridColumn: "1 / -1" }}>
                   <TrackDetailPanel
                     track={selectedTrack}
                     onClose={() => setSelectedTrack(null)}
                   />
-                ) : tracks.length > 0 ? (
-                  tracks.map((track) => (
-                    <TrackCard
-                      key={track.id}
-                      track={track}
-                      masterScript={track.master_script_id ? masterMap[track.master_script_id] : undefined}
-                      notify={{
-                        enabled: notifyEnabled,
-                        email: notifyEmail,
-                        link: notifyLink,
-                        programTitle: program?.title,
-                      }}
-                      onSelect={() => setSelectedTrack(track)}
-                    />
-                  ))
-                ) : (
-                  <div className="empty-state">
-                    <p>No tracks yet</p>
-                    <Button variant="primary" onClick={() => setIsAddTrackOpen(true)}>
-                      Add Track
-                    </Button>
-                  </div>
-                )}
-              </div>
+                </div>
+              ) : tracks.length > 0 ? (
+                tracks.map((track) => (
+                  <TrackCard
+                    key={track.id}
+                    track={track}
+                    masterScript={track.master_script_id ? masterMap[track.master_script_id] : undefined}
+                    notify={{
+                      enabled: notifyEnabled,
+                      email: notifyEmail,
+                      link: notifyLink,
+                      programTitle: program?.title,
+                    }}
+                    onSelect={() => setSelectedTrack(track)}
+                  />
+                ))
+              ) : (
+                <div className="empty-state" style={{ gridColumn: "1 / -1", padding: "40px" }}>
+                  <p>No tracks yet</p>
+                  <Button variant="primary" onClick={() => setIsAddTrackOpen(true)} style={{ marginTop: "16px" }}>
+                    Create First Track
+                  </Button>
+                </div>
+              )}
             </div>
-          </aside>
+          </section>
+
         </div>
+
         <AddTrackModal
           open={isAddTrackOpen}
           programId={program.id}
@@ -679,141 +620,110 @@ function TrackCard({ track, masterScript, notify, onSelect }: TrackCardProps) {
   const hasVideo = Boolean(track.video_path);
 
   return (
-    <div className="track-card">
-      <div
-        className="track-meta"
-        onClick={() => onSelect ? onSelect() : setExpanded(!expanded)}
-        style={{ cursor: 'pointer' }}
-      >
-        <div className="track-title">
-          {trackLabel(track)}
-          {track.voice_id && <span className="voice-label"> • Voice: {track.voice_id}</span>}
-        </div>
-        <div className="track-status">
-          {formatStage(track.stage)}
-          {track.status && track.status !== "Pending" && !["TRANSLATING_CLOUD", "CLOUD_TRANSLATING", "CLOUD_REVIEWING", "REVIEWED", "FINALIZING", "BURNING", "COMPLETE", "DELIVERED", "FINALIZED"].includes(track.stage) && (
-            <span className="status-detail"> — {track.status}</span>
+    <div
+      className={`flex flex-col p-4 mb-3 rounded-xl transition-all relative overflow-hidden group`}
+      style={{
+        background: expanded ? "rgba(255,255,255,0.05)" : "rgba(255,255,255,0.02)",
+        border: expanded ? "1px solid rgba(var(--omega-blue), 0.5)" : "1px solid rgba(255,255,255,0.05)",
+        boxShadow: expanded ? "0 0 0 1px rgba(var(--omega-blue), 0.2)" : "0 4px 12px rgba(0,0,0,0.1)"
+      }}
+    >
+      <div className="flex items-center justify-between gap-6">
+        {/* Left Side: Overview & Progress */}
+        <div className="flex flex-col flex-1 min-w-0 pr-4 cursor-pointer gap-2" onClick={() => onSelect ? onSelect() : setExpanded(!expanded)}>
+          <div className="flex flex-col gap-1.5">
+            <div className="flex items-center gap-2.5">
+              <span className="text-[15px] font-medium text-gray-100 truncate">{trackLabel(track)}</span>
+              <Badge label={formatStage(track.stage)} variant={stageVariant(track.stage)} />
+            </div>
+
+            <div className="flex items-center gap-2 flex-wrap">
+              {Boolean(track.output_version) && (
+                <span className="text-[10px] font-mono font-medium rounded px-1.5 py-0.5" style={{ color: "rgb(147, 197, 253)", backgroundColor: "rgba(59, 130, 246, 0.1)", border: "1px solid rgba(59, 130, 246, 0.2)" }} title="Output Version">v{track.output_version}</span>
+              )}
+              {Boolean(track.pending_resync) && (
+                <span className="text-[10px] font-medium rounded px-1.5 py-0.5 animate-pulse" style={{ color: "rgb(252, 211, 77)", backgroundColor: "rgba(245, 158, 11, 0.1)", border: "1px solid rgba(245, 158, 11, 0.2)" }}>⟳ Resync</span>
+              )}
+              {Boolean(track.output_override) && (
+                <span className="text-[10px] font-medium rounded px-1.5 py-0.5" style={{ color: "rgb(216, 180, 254)", backgroundColor: "rgba(168, 85, 247, 0.1)", border: "1px solid rgba(168, 85, 247, 0.2)" }}>✎ Override</span>
+              )}
+              {Boolean(track.locked_at) && (
+                <span className="text-[10px] font-medium rounded px-1.5 py-0.5" style={{ color: "rgb(110, 231, 183)", backgroundColor: "rgba(16, 185, 129, 0.1)", border: "1px solid rgba(16, 185, 129, 0.2)" }}>🔒 Locked</span>
+              )}
+              {Boolean(masterLocked) && (
+                <span className="text-[10px] font-medium rounded px-1.5 py-0.5" style={{ color: "rgb(125, 211, 252)", backgroundColor: "rgba(14, 165, 233, 0.1)", border: "1px solid rgba(14, 165, 233, 0.2)" }}>🔒 Master</span>
+              )}
+              {Boolean(track.voice_id) && <span className="text-[11px] text-muted truncate max-w-[150px]">• {track.voice_id}</span>}
+            </div>
+          </div>
+
+          {!["PENDING", "COMPLETE", "COMPLETED", "DELIVERED", "FINALIZED", "APPROVED"].includes(track.stage) && (
+            <div className="w-full max-w-lg mt-2">
+              {["TRANSLATING_CLOUD", "CLOUD_TRANSLATING", "CLOUD_REVIEWING", "TRANSLATING_CLOUD_SUBMITTED", "REVIEWED", "FINALIZING", "BURNING"].includes(track.stage) ? (
+                <>
+                  <TranslationStepper track={track} showStatus={!["CLOUD_TRANSLATING", "CLOUD_REVIEWING", "BURNING", "FINALIZING"].includes(track.stage)} />
+                  {["CLOUD_TRANSLATING", "CLOUD_REVIEWING", "BURNING", "FINALIZING"].includes(track.stage) && (
+                    <div className="mt-2">
+                      <ProgressBar value={track.progress} label={<span className="flex items-center gap-2">{track.stage.includes("CLOUD") && <span className="animate-pulse text-emerald-400">●</span>}{track.status || "Processing..."}</span>} />
+                    </div>
+                  )}
+                </>
+              ) : (
+                <ProgressBar value={track.progress} label={`${track.language_name} progress`} />
+              )}
+            </div>
           )}
         </div>
 
-        {/* Use Stepper for Cloud Translation Pipeline */}
-        {/* Use Stepper for Cloud Translation Pipeline */}
-        {["TRANSLATING_CLOUD", "CLOUD_TRANSLATING", "CLOUD_REVIEWING", "TRANSLATING_CLOUD_SUBMITTED", "REVIEWED", "FINALIZING", "BURNING", "COMPLETE", "DELIVERED", "FINALIZED", "APPROVED"].includes(track.stage) ? (
-          <>
-            <TranslationStepper
-              track={track}
-              showStatus={!["CLOUD_TRANSLATING", "CLOUD_REVIEWING", "BURNING", "FINALIZING"].includes(track.stage)}
-            />
-            {/* Show Progress Bar during active processing */}
-            {["CLOUD_TRANSLATING", "CLOUD_REVIEWING", "BURNING", "FINALIZING"].includes(track.stage) && (
-              <div style={{ marginTop: 8 }}>
-                <ProgressBar
-                  value={track.progress}
-                  label={
-                    <span className="flex items-center gap-2">
-                      {track.stage.includes("CLOUD") && <span className="animate-pulse text-green-400">●</span>}
-                      {track.status || "Processing..."}
-                    </span>
-                  }
-                />
-              </div>
-            )}
-          </>
-        ) : (
-          <ProgressBar value={track.progress} label={`${track.language_name} progress`} />
-        )}
-      </div>
-      <div className="track-actions">
-        <div className="track-output-links">
-          <div className="track-output-label">Outputs</div>
-          <div className="track-output-buttons">
-            {hasSrt ? (
-              <Button variant="ghost" onClick={() => handleReveal("srt")} disabled={busy}>
-                Open SRT
-              </Button>
-            ) : (
-              <span className="track-output-muted">SRT pending</span>
-            )}
-            {hasVideo ? (
-              <Button variant="ghost" onClick={() => handleReveal("video")} disabled={busy}>
-                Open Video
-              </Button>
-            ) : (
-              <span className="track-output-muted">Video pending</span>
-            )}
-          </div>
+        {/* Right Side: Actions Core */}
+        <div className="flex items-center gap-3 shrink-0 ml-4 py-1">
+
+          {(hasSrt || hasVideo) && (
+            <div className="flex items-center rounded-md p-1 shadow-sm h-8" style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.05)" }}>
+              {hasSrt && (
+                <button className="px-3 h-full flex items-center text-xs font-medium text-gray-400 hover:text-white hover:bg-white/10 rounded-sm transition-colors" onClick={(e) => { e.stopPropagation(); handleReveal("srt"); }} disabled={busy}>SRT</button>
+              )}
+              {hasSrt && hasVideo && <div className="w-px h-4 bg-white/10 mx-1" />}
+              {hasVideo && (
+                <button className="px-3 h-full flex items-center text-xs font-medium text-gray-400 hover:text-white hover:bg-white/10 rounded-sm transition-colors" onClick={(e) => { e.stopPropagation(); handleReveal("video"); }} disabled={busy}>Video</button>
+              )}
+            </div>
+          )}
+
+          {(canDub || canReburn || canDeliver) && (
+            <div className="flex items-center gap-2 h-8">
+              {canDub && (
+                <button className="px-4 h-full flex items-center text-xs font-medium text-white rounded-md transition-colors shadow-sm hover:brightness-110" style={{ background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.05)" }} onClick={(e) => { e.stopPropagation(); handleStartDub(); }} disabled={busy}>
+                  Start Dub
+                </button>
+              )}
+
+              {canReburn && (
+                <button className="px-4 h-full flex items-center text-xs font-medium text-gray-300 rounded-md transition-colors hover:bg-white/5" style={{ background: "transparent", border: "1px solid rgba(255,255,255,0.08)" }} onClick={(e) => { e.stopPropagation(); handleReburn(); }} disabled={busy}>
+                  Re-burn
+                </button>
+              )}
+
+              {canDeliver && (
+                <div className="flex items-center rounded-md p-1 shadow-sm h-full" style={{ backgroundColor: "rgba(16, 185, 129, 0.1)", border: "1px solid rgba(16, 185, 129, 0.2)" }}>
+                  <button className="px-3 h-full flex items-center text-xs font-medium text-emerald-400 hover:text-emerald-300 rounded-sm transition-colors" style={{ backgroundColor: "transparent" }} onClick={(e) => { e.stopPropagation(); handleProvisionalDeliver(); }} disabled={busy}>
+                    Provisional
+                  </button>
+                  <div className="w-px h-4 mx-1" style={{ backgroundColor: "rgba(16, 185, 129, 0.2)" }} />
+                  <button className="px-3 h-full flex items-center text-xs font-medium text-emerald-400 hover:text-emerald-300 rounded-sm transition-colors shadow-sm" style={{ backgroundColor: "rgba(16, 185, 129, 0.1)" }} onClick={(e) => { e.stopPropagation(); handleDeliver(); }} disabled={busy}>
+                    Deliver
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
         </div>
-        {/* Version Badge */}
-        {track.output_version && (
-          <span
-            className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-300 border border-blue-500/30"
-            title="Output Version"
-          >
-            v{track.output_version}
-          </span>
-        )}
-        {/* Pending Resync Indicator */}
-        {track.pending_resync && (
-          <span
-            className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 animate-pulse"
-            title="Pending resync with master script - changes may be required"
-          >
-            ⟳ Resync
-          </span>
-        )}
-        {/* Override Indicator */}
-        {track.output_override && (
-          <span
-            className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30"
-            title={`Override: ${track.override_reason || 'Output-only fix'}`}
-          >
-            ✎ Override
-          </span>
-        )}
-        {/* Locked Badge */}
-        {track.locked_at && (
-          <span
-            className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
-            title={`Locked${track.locked_by ? ` by ${track.locked_by}` : ''}`}
-          >
-            🔒 Locked
-          </span>
-        )}
-        {masterLocked && (
-          <span
-            className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-300 border border-sky-500/30"
-            title={`Master locked${masterScript?.locked_by ? ` by ${masterScript.locked_by}` : ''}`}
-          >
-            🔒 Master
-          </span>
-        )}
-        <Badge label={formatStage(track.stage)} variant={stageVariant(track.stage)} />
-
-        {canDub && (
-          <Button variant="secondary" onClick={handleStartDub} disabled={busy}>
-            {busy ? "Starting..." : "Start Dub"}
-          </Button>
-        )}
-
-        {canReburn && (
-          <Button variant="secondary" onClick={handleReburn} disabled={busy} title="Regenerate verified video">
-            {busy ? "Queuing..." : "Re-burn"}
-          </Button>
-        )}
-
-        {canDeliver && (
-          <>
-            <Button variant="ghost" onClick={handleDeliver} disabled={busy}>
-              {busy ? "Delivering..." : "Deliver"}
-            </Button>
-            <Button variant="secondary" onClick={handleProvisionalDeliver} disabled={busy}>
-              {busy ? "Delivering..." : "Provisional"}
-            </Button>
-          </>
-        )}
       </div>
+
       {expanded && (
-        <TrackDetailPanel track={track} onClose={() => setExpanded(false)} />
+        <div className="mt-4 pt-4 border-t border-white/10">
+          <TrackDetailPanel track={track} onClose={() => setExpanded(false)} />
+        </div>
       )}
     </div>
   );

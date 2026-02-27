@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-type ViewType = "library" | "pipeline" | "delivery" | "grid" | "ops";
+type ViewType = "dashboard" | "programs" | "settings";
 
 interface NavigationStore {
   activeView: ViewType;
@@ -11,7 +11,7 @@ interface NavigationStore {
 }
 
 export const useNavigation = create<NavigationStore>((set) => ({
-  activeView: "library",
+  activeView: "dashboard",
   setActiveView: (view) => set({ activeView: view }),
   selectedProgramId: null,
   selectProgram: (id) => set({ selectedProgramId: id }),

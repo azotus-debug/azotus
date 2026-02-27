@@ -2045,7 +2045,7 @@
 /* Summary Cards */
 .ops-summary-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 16px;
 }
 
@@ -2593,4 +2593,198 @@
   .ops-right-column {
     flex-direction: column;
   }
+}
+
+
+/* =============================================================================
+   Cloud Workers Panel
+   ============================================================================= */
+
+.cloud-workers-panel {
+  border-radius: 14px;
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  background: rgba(99, 102, 241, 0.06);
+  overflow: hidden;
+  margin-bottom: 20px;
+}
+
+.cloud-workers-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  background: rgba(99, 102, 241, 0.08);
+  border-bottom: 1px solid rgba(99, 102, 241, 0.15);
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s ease;
+}
+
+.cloud-workers-header:hover {
+  background: rgba(99, 102, 241, 0.12);
+}
+
+.cloud-workers-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: rgba(129, 140, 248, 0.95);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.cloud-workers-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  color: rgba(129, 140, 248, 0.95);
+  background: rgba(99, 102, 241, 0.18);
+}
+
+.cloud-workers-collapse {
+  font-size: 12px;
+  color: var(--text-secondary);
+  transition: transform 0.2s ease;
+}
+
+.cloud-workers-collapse--open {
+  transform: rotate(180deg);
+}
+
+.cloud-workers-body {
+  max-height: 600px;
+  overflow-y: auto;
+}
+
+.cloud-track-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+  border-bottom: 1px solid rgba(99, 102, 241, 0.08);
+}
+
+.cloud-track-row:last-child {
+  border-bottom: none;
+}
+
+.cloud-track-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.cloud-track-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.cloud-track-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cloud-track-lang {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  flex-shrink: 0;
+}
+
+.cloud-track-timing {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.cloud-elapsed {
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
+.cloud-retry-badge {
+  display: inline-flex;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  color: rgba(245, 158, 11, 0.95);
+  background: rgba(245, 158, 11, 0.15);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+.cloud-track-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.cloud-track-progress .progress-bar {
+  flex: 1;
+}
+
+.cloud-progress-pct {
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+  width: 36px;
+  text-align: right;
+}
+
+.cloud-track-bottom {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.cloud-status-text {
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cloud-timeout {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.cloud-timeout--safe {
+  color: var(--text-secondary);
+}
+
+.cloud-timeout--warning {
+  color: rgba(245, 158, 11, 0.95);
+}
+
+.cloud-timeout--danger {
+  color: rgba(239, 68, 68, 0.95);
+  animation: pulse-glow 2s infinite ease-in-out;
 }

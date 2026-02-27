@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { useToastStore } from "@/store/toast";
 import {
   Save,
@@ -18,7 +18,9 @@ import {
   ChevronDown,
   ChevronRight,
   Maximize2,
-  Minimize2
+  Minimize2,
+  HelpCircle,
+  Search
 } from "lucide-react";
 import Link from "next/link";
 import { AssistantPanel } from "@/components/AssistantPanel";
@@ -176,7 +178,7 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
     }
   });
   const [selectedIndices, setSelectedIndices] = useState<Set<number>>(new Set());
-  const [flaggedSegmentIds, setFlaggedSegmentIds] = useState<Set<number>>(new Set());
+  const [flaggedSegmentIds, setFlaggedSegmentIds] = useState<Set<number | string>>(new Set());
   const [graphicZones, setGraphicZones] = useState<GraphicZone[]>(initialGraphicZones);
   const [isMarkingZone, setIsMarkingZone] = useState(false);
   const [pendingZoneStart, setPendingZoneStart] = useState<number | null>(null);
@@ -205,7 +207,7 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
 
   useEffect(() => {
     if (history.length === 0 && initialSegments.length > 0) setSegments(initialSegments);
-  }, [initialSegments]);
+  }, [history.length, initialSegments]);
 
   // Persist history to localStorage (keep last 20 entries to avoid quota issues)
   useEffect(() => {
@@ -220,14 +222,14 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
 
   const pushHistory = () => setHistory((prev) => [...prev.slice(-49), segments]);
 
-  const handleUndo = () => {
+  const handleUndo = useCallback(() => {
     if (history.length === 0) return;
     const previous = history[history.length - 1];
     setSegments(previous);
     setHistory((prev) => prev.slice(0, -1));
     setSelectedIndices(new Set());
     setIsDirty(true);
-  };
+  }, [history]);
 
   const warningsByIndex = useMemo(
     () => segments.map((segment) => getWarnings(segment, trackLanguage)),
@@ -369,20 +371,21 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [segments, selectedIndices]); // Re-bind when segments change
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [segments, selectedIndices]); // Re-bind when segment state changes
 
-  const togglePlay = () => {
+  const togglePlay = useCallback(() => {
     if (videoRef.current) {
       if (videoRef.current.paused) videoRef.current.play();
       else videoRef.current.pause();
     }
-  };
+  }, []);
 
-  const handleSeek = (value: number) => {
+  const handleSeek = useCallback((value: number) => {
     if (!videoRef.current) return;
     videoRef.current.currentTime = value;
     setCurrentTime(value);
-  };
+  }, []);
 
   const handleSegmentChange = (index: number, field: keyof Segment, value: string | number) => {
     const newSegments = [...segments];
@@ -449,7 +452,7 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
     setIsDirty(true);
   };
 
-  const handleSave = async () => {
+  const handleSave = useCallback(async () => {
     setSaving(true);
     try {
       await fetch(`/api/editor/${jobId}`, {
@@ -469,7 +472,7 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
     } finally {
       setSaving(false);
     }
-  };
+  }, [addToast, graphicZones, history, jobId, segments]);
 
   const activeIndex = segments.findIndex((s) => currentTime >= s.start && currentTime < s.end);
   const activeSegment = activeIndex >= 0 ? segments[activeIndex] : null;
@@ -487,7 +490,7 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
       handleSave();
     }, 30000);
     return () => clearTimeout(timer);
-  }, [isDirty, segments, graphicZones]);
+  }, [isDirty, handleSave]);
 
   // Warn before leaving with unsaved changes
   useEffect(() => {
@@ -501,21 +504,21 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
   }, [isDirty]);
 
-  const seekPrev = () => {
+  const seekPrev = useCallback(() => {
     if (!segments.length) return;
     const targetIndex = Math.max(0, activeIndex > 0 ? activeIndex - 1 : 0);
     const target = segments[targetIndex];
     handleSeek(target.start);
     setSelectedIndices(new Set([targetIndex]));
-  };
+  }, [activeIndex, handleSeek, segments]);
 
-  const seekNext = () => {
+  const seekNext = useCallback(() => {
     if (!segments.length) return;
     const targetIndex = Math.min(segments.length - 1, activeIndex >= 0 ? activeIndex + 1 : 0);
     const target = segments[targetIndex];
     handleSeek(target.start);
     setSelectedIndices(new Set([targetIndex]));
-  };
+  }, [activeIndex, handleSeek, segments]);
 
   return (
     <div className="flex h-screen w-screen flex-col bg-[rgb(10,10,12)] overflow-hidden">
@@ -547,7 +550,7 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
             className="btn btn-ghost p-2 text-muted hover:text-white"
             title="Keyboard shortcuts (?)"
           >
-            <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg>
+            <HelpCircle className="w-4 h-4" />
           </button>
           <button onClick={handleSave} disabled={saving} className="btn btn-primary">
             {saving ? <Loader2 className="w-4 h-4 spin" /> : <Save className="w-4 h-4" />}
@@ -568,6 +571,16 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
                 src={`/api/stream/${jobId}`}
                 className="max-w-full max-h-full object-contain rounded-sm"
                 onClick={togglePlay}
+                onError={(e) => {
+                  e.currentTarget.style.display = 'none';
+                  const p = e.currentTarget.parentElement;
+                  if (p && !p.querySelector('.video-fallback')) {
+                    const fb = document.createElement('div');
+                    fb.className = 'video-fallback absolute inset-0 flex flex-col items-center justify-center text-gray-500 bg-black/50 text-xs px-4 text-center';
+                    fb.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mb-3 opacity-50"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M7 3v18"/><path d="M3 7.5h4"/><path d="M3 12h18"/><path d="M3 16.5h4"/><path d="M17 3v18"/><path d="M17 7.5h4"/><path d="M17 16.5h4"/></svg>Video preview not available or processing';
+                    p.appendChild(fb);
+                  }
+                }}
               />
               {/* Subtitle Overlay - Lower third with inline styles to ensure visibility */}
               {activeSegment && (
@@ -634,7 +647,7 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
 
             {/* Search Bar */}
             <div className="h-9 flex items-center gap-2 px-5 border-b border-subtle shrink-0">
-              <svg xmlns="http://www.w3.org/2000/svg" className="w-3.5 h-3.5 text-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+              <Search className="w-3.5 h-3.5 text-muted" />
               <input
                 ref={searchInputRef}
                 type="text"
@@ -838,6 +851,7 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
               >
                 <AIQualityPanel
                   jobId={jobId}
+                  editorReport={editorReportRaw}
                   onJumpToSegment={(segmentId) => {
                     const segIndex = segments.findIndex(s => s.id === segmentId);
                     if (segIndex >= 0) {

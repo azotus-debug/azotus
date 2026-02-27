@@ -4,7 +4,7 @@ import { useState, useRef, useEffect } from "react";
 import { Sparkles, Zap, ArrowUp, Loader2, Check, Copy, ClipboardCheck } from "lucide-react";
 
 type StructuredSuggestion = {
-  segment_id: number;
+  segment_id: number | string;
   suggested_text: string;
 };
 
@@ -18,7 +18,7 @@ interface AssistantPanelProps {
   jobId: string | null;
   onClose?: () => void;
   mode?: "modal" | "sidebar";
-  onApplySuggestion?: (segmentId: number, newText: string) => void;
+  onApplySuggestion?: (segmentId: number | string, newText: string) => void;
 }
 
 const QUICK_PROMPTS = [
@@ -40,7 +40,7 @@ function parseSuggestions(data: Record<string, unknown>): StructuredSuggestion[]
       (s: unknown): s is StructuredSuggestion =>
         typeof s === "object" &&
         s !== null &&
-        typeof (s as StructuredSuggestion).segment_id === "number" &&
+        (typeof (s as StructuredSuggestion).segment_id === "number" || typeof (s as StructuredSuggestion).segment_id === "string") &&
         typeof (s as StructuredSuggestion).suggested_text === "string"
     );
   }
@@ -49,11 +49,11 @@ function parseSuggestions(data: Record<string, unknown>): StructuredSuggestion[]
   const text = String(data.response || "");
   const results: StructuredSuggestion[] = [];
   // Match patterns like: Segment 5: "some text here" or Segment #5: "text"
-  const regex = /[Ss]egment\s*#?(\d+)\s*:\s*"([^"]+)"/g;
+  const regex = /[Ss]egment\s*#?([\d_]+)\s*:\s*"([^"]+)"/g;
   let match;
   while ((match = regex.exec(text)) !== null) {
     results.push({
-      segment_id: parseInt(match[1], 10),
+      segment_id: match[1],
       suggested_text: match[2],
     });
   }

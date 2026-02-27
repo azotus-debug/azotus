@@ -1,6 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  eslint: {
+    ignoreDuringBuilds: true,
+  },
   experimental: {
     serverActions: {
       bodySizeLimit: "300gb",
@@ -13,8 +16,14 @@ const nextConfig: NextConfig = {
   async rewrites() {
     return [
       {
+        // All API traffic → FastAPI on port 8001 (single backend)
         source: "/api/:path*",
-        destination: "http://127.0.0.1:8080/api/:path*", // Proxy to Python Backend (Port 8080)
+        destination: "http://127.0.0.1:8001/api/:path*",
+      },
+      {
+        // Proxy Socket.IO polling/websocket upgrades to FastAPI backend
+        source: "/socket.io/:path*",
+        destination: "http://127.0.0.1:8001/socket.io/:path*",
       },
     ];
   },

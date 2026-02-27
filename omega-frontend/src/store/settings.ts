@@ -28,7 +28,7 @@ interface SettingsStore {
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 
-export const useSettingsStore = create<SettingsStore>((set, get) => ({
+export const useSettingsStore = create<SettingsStore>((set) => ({
   settings: null,
   loading: false,
   error: null,

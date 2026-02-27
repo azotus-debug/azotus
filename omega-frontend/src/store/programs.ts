@@ -116,7 +116,7 @@ interface ProgramsStore {
     sendTrackToReview: (trackId: string) => Promise<boolean>;
     approveTrack: (trackId: string) => Promise<boolean>;
     revealFile: (trackId: string, fileType: 'video' | 'srt') => Promise<boolean>;
-    handleSSEEvent: (eventType: string, data: any) => void;
+    handleSSEEvent: (eventType: string, data: unknown) => void;
 }
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
@@ -299,7 +299,7 @@ export const useProgramsStore = create<ProgramsStore>((set, get) => ({
         }
     },
 
-    handleSSEEvent: (eventType: string, data: any) => {
+    handleSSEEvent: (eventType: string, data: unknown) => {
         const { fetchPrograms, fetchActiveTracks, fetchPipelineStats, fetchDeliveries } = get();
 
         switch (eventType) {
@@ -318,7 +318,11 @@ export const useProgramsStore = create<ProgramsStore>((set, get) => ({
                 break;
             case "track_progress": {
                 // Optimistic in-place update of a single track's progress
-                const { track_id, progress, status, stage } = data || {};
+                const payload = (typeof data === "object" && data !== null ? data : {}) as Record<string, unknown>;
+                const track_id = typeof payload.track_id === "string" ? payload.track_id : "";
+                const progress = typeof payload.progress === "number" ? payload.progress : undefined;
+                const status = typeof payload.status === "string" ? payload.status : undefined;
+                const stage = typeof payload.stage === "string" ? payload.stage : undefined;
                 if (!track_id) break;
                 set((state) => ({
                     programs: state.programs.map((program) => ({

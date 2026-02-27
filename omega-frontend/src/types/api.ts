@@ -176,7 +176,7 @@ export interface BatchActionResponse {
 // ---------------------------------------------------------------------------
 
 export interface Segment {
-  id?: number;
+  id?: number | string;
   start: number;
   end: number;
   text: string;

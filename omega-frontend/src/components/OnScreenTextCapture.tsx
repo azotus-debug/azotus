@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useCallback } from "react";
+import Image from "next/image";
 import { Camera, Copy, Check, Type, X, Plus } from "lucide-react";
 
 // =============================================================================
@@ -143,9 +144,12 @@ export function OnScreenTextCapture({ videoRef, onCreateSegment }: OnScreenTextC
                             {/* Thumbnail + Timestamp */}
                             <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
                                 {capture.imageUrl && (
-                                    <img
+                                    <Image
                                         src={capture.imageUrl}
                                         alt={`Capture at ${formatTimestamp(capture.timestamp)}`}
+                                        width={60}
+                                        height={34}
+                                        unoptimized
                                         style={{
                                             width: 60,
                                             height: 34,

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
+import Link from "next/link";
 import { useParams } from "next/navigation";
 import { AlertTriangle } from "lucide-react";
 
@@ -58,12 +59,12 @@ export default function EditorError({
                     >
                         Try Again
                     </button>
-                    <a
+                    <Link
                         href="/"
                         className="px-5 py-2.5 text-sm font-medium rounded-lg border border-zinc-700 text-zinc-300 hover:bg-zinc-800 transition-colors"
                     >
                         Back to Library
-                    </a>
+                    </Link>
                 </div>
             </div>
         </div>

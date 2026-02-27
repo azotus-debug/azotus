@@ -8,7 +8,7 @@ import { AlertTriangle, CheckCircle2, Star, ChevronDown, ChevronRight } from "lu
 // =============================================================================
 
 interface FlaggedSegment {
-    id: number;
+    id: number | string;
     reason: string;
     severity?: "low" | "medium" | "high";
     original?: string;
@@ -59,10 +59,27 @@ function getSeverityColor(severity?: string): string {
 
 interface AIQualityPanelProps {
     jobId: string;
-    onJumpToSegment?: (segmentId: number) => void;
+    editorReport?: unknown;
+    onJumpToSegment?: (segmentId: number | string) => void;
 }
 
-export function AIQualityPanel({ jobId, onJumpToSegment }: AIQualityPanelProps) {
+function parseEditorReport(value: unknown): EditorReportData | null {
+    if (!value) return null;
+    if (typeof value === "string") {
+        try {
+            const parsed = JSON.parse(value);
+            return typeof parsed === "object" && parsed !== null ? (parsed as EditorReportData) : null;
+        } catch {
+            return null;
+        }
+    }
+    if (typeof value === "object") {
+        return value as EditorReportData;
+    }
+    return null;
+}
+
+export function AIQualityPanel({ jobId, editorReport, onJumpToSegment }: AIQualityPanelProps) {
     const [report, setReport] = useState<EditorReportData | null>(null);
     const [loading, setLoading] = useState(true);
     const [expanded, setExpanded] = useState(true);
@@ -70,15 +87,22 @@ export function AIQualityPanel({ jobId, onJumpToSegment }: AIQualityPanelProps) 
 
     useEffect(() => {
         async function fetchReport() {
-            try {
-                const res = await fetch(`/api/jobs`);
-                const jobs = await res.json();
-                const job = jobs.find((j: { file_stem: string }) => j.file_stem === jobId);
+            const inlineReport = parseEditorReport(editorReport);
+            if (inlineReport) {
+                setReport(inlineReport);
+                setLoading(false);
+                return;
+            }
 
-                if (job?.editor_report) {
-                    const parsed = typeof job.editor_report === "string"
-                        ? JSON.parse(job.editor_report)
-                        : job.editor_report;
+            try {
+                const res = await fetch(`/api/editor/${encodeURIComponent(jobId)}`);
+                if (!res.ok) throw new Error(`Failed to load editor context: ${res.status}`);
+                const payload = await res.json();
+                const rawReport =
+                    payload?.track?.meta?.editor_report ??
+                    payload?.track?.editor_report;
+                const parsed = parseEditorReport(rawReport);
+                if (parsed) {
                     setReport(parsed);
                 }
             } catch (e) {
@@ -89,7 +113,7 @@ export function AIQualityPanel({ jobId, onJumpToSegment }: AIQualityPanelProps) 
         }
 
         fetchReport();
-    }, [jobId]);
+    }, [jobId, editorReport]);
 
     if (loading) {
         return (

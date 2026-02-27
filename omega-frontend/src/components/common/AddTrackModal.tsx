@@ -83,7 +83,7 @@ export default function AddTrackModal({ open, programId, onClose }: AddTrackModa
       setVoiceId("");
     }
     setError("");
-  }, [open, selectedLanguage?.code, voices]);
+  }, [open, selectedLanguage, voices]);
 
   useEffect(() => {
     if (!open) {

@@ -22,8 +22,9 @@ export function UploadZone({ onUploadComplete }: UploadZoneProps) {
         try {
             for (let i = 0; i < files.length; i++) {
                 const formData = new FormData();
-                formData.append("file", files[i]);
-                const res = await fetch("/api/upload", { method: "POST", body: formData });
+                formData.append("file_0", files[i]);
+                formData.append("mode", "full_pipeline");
+                const res = await fetch("/api/v2/programs/upload", { method: "POST", body: formData });
                 if (!res.ok) throw new Error("Upload Failed");
             }
             onUploadComplete();

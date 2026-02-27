@@ -1,9 +1,10 @@
 "use client";
 
 import { useState, useRef, useCallback } from "react";
-import { Upload, X, Film, FileText, Loader2, Check } from "lucide-react";
+import { Upload, X, Film, FileText, Loader2, Check, Zap, ShieldAlert } from "lucide-react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
+const VIDEO_EXTENSIONS = /\.(mp4|mov|mkv|avi|webm|m4v|wmv|flv|mts|m2ts|ts|mxf|prores)$/i;
 
 interface ImportMediaModalProps {
   isOpen: boolean;
@@ -40,9 +41,6 @@ export default function ImportMediaModal({ isOpen, onClose, onSuccess }: ImportM
   const [success, setSuccess] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const srtInputRef = useRef<HTMLInputElement>(null);
-
-  // Supported video extensions
-  const VIDEO_EXTENSIONS = /\.(mp4|mov|mkv|avi|webm|m4v|wmv|flv|mts|m2ts|ts|mxf|prores)$/i;
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -119,7 +117,7 @@ export default function ImportMediaModal({ isOpen, onClose, onSuccess }: ImportM
         });
 
         xhr.addEventListener("error", () => reject(new Error("Network error")));
-        xhr.open("POST", `${API_BASE}/api/smart_upload`);
+        xhr.open("POST", `${API_BASE}/api/v2/programs/upload`);
         xhr.send(formData);
       });
 
@@ -223,9 +221,56 @@ export default function ImportMediaModal({ isOpen, onClose, onSuccess }: ImportM
             )}
           </div>
 
+          {/* Pipeline Strategy */}
+          {!srtFile && (
+            <div className="section" style={{ marginTop: "16px" }}>
+              <h3>Pipeline Strategy</h3>
+              <div className="mode-options" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", flexDirection: "row" }}>
+                <label className={`mode-option ${reviewMode === "automatic" ? "selected" : ""}`} style={{ flexDirection: "column", alignItems: "center", textAlign: "center", padding: "24px 16px" }}>
+                  <input
+                    type="radio"
+                    name="reviewMode"
+                    value="automatic"
+                    checked={reviewMode === "automatic"}
+                    onChange={() => setReviewMode("automatic")}
+                    style={{ position: "absolute", opacity: 0 }}
+                  />
+                  <div style={{ marginBottom: "16px", color: reviewMode === "automatic" ? "rgb(var(--omega-blue))" : "rgb(var(--omega-text-3))", transition: "color 0.2s" }}>
+                    <Zap size={32} />
+                  </div>
+                  <div className="mode-content" style={{ alignItems: "center", width: "100%" }}>
+                    <span className="mode-title" style={{ fontSize: "16px", marginBottom: "6px" }}>Zero-Touch Automation</span>
+                    <span className="mode-desc" style={{ lineHeight: "1.4" }}>
+                      Fully automated from upload to final burn. No human intervention needed.
+                    </span>
+                  </div>
+                </label>
+                <label className={`mode-option ${reviewMode === "human" ? "selected" : ""}`} style={{ flexDirection: "column", alignItems: "center", textAlign: "center", padding: "24px 16px" }}>
+                  <input
+                    type="radio"
+                    name="reviewMode"
+                    value="human"
+                    checked={reviewMode === "human"}
+                    onChange={() => setReviewMode("human")}
+                    style={{ position: "absolute", opacity: 0 }}
+                  />
+                  <div style={{ marginBottom: "16px", color: reviewMode === "human" ? "rgb(var(--omega-blue))" : "rgb(var(--omega-text-3))", transition: "color 0.2s" }}>
+                    <ShieldAlert size={32} />
+                  </div>
+                  <div className="mode-content" style={{ alignItems: "center", width: "100%" }}>
+                    <span className="mode-title" style={{ fontSize: "16px", marginBottom: "6px" }}>Human Review</span>
+                    <span className="mode-desc" style={{ lineHeight: "1.4" }}>
+                      Pause pipeline after translation for manual editor polish before final burning.
+                    </span>
+                  </div>
+                </label>
+              </div>
+            </div>
+          )}
+
           {/* Language Selection */}
           {!srtFile && (
-            <div className="section">
+            <div className="section" style={{ marginTop: "32px" }}>
               <h3>Target Languages</h3>
               <div className="language-grid">
                 {AVAILABLE_LANGUAGES.map(lang => (
@@ -240,45 +285,6 @@ export default function ImportMediaModal({ isOpen, onClose, onSuccess }: ImportM
                     {selectedLanguages.includes(lang.code) && <Check size={16} />}
                   </button>
                 ))}
-              </div>
-            </div>
-          )}
-
-          {/* Pipeline Mode */}
-          {!srtFile && (
-            <div className="section">
-              <h3>Pipeline Mode</h3>
-              <div className="mode-options">
-                <label className={`mode-option ${reviewMode === "automatic" ? "selected" : ""}`}>
-                  <input
-                    type="radio"
-                    name="reviewMode"
-                    value="automatic"
-                    checked={reviewMode === "automatic"}
-                    onChange={() => setReviewMode("automatic")}
-                  />
-                  <div className="mode-content">
-                    <span className="mode-title">Automatic</span>
-                    <span className="mode-desc">
-                      Full pipeline: transcribe → translate → finalize → burn
-                    </span>
-                  </div>
-                </label>
-                <label className={`mode-option ${reviewMode === "human" ? "selected" : ""}`}>
-                  <input
-                    type="radio"
-                    name="reviewMode"
-                    value="human"
-                    checked={reviewMode === "human"}
-                    onChange={() => setReviewMode("human")}
-                  />
-                  <div className="mode-content">
-                    <span className="mode-title">Human in the Loop</span>
-                    <span className="mode-desc">
-                      Pause for review after translation before burning
-                    </span>
-                  </div>
-                </label>
               </div>
             </div>
           )}
