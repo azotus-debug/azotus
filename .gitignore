@@ -1,5 +1,6 @@
 # Secrets
 .env
+.env.backup
 .omega_secrets
 service_account.json
 
@@ -14,6 +15,16 @@ __pycache__/
 *.pyc
 *.pyo
 .venv/
+temp_render/
+
+# Debug/temp artifacts
+editor_report.json
+translation_draft.json
+tests/v8_chunk_test_result.json
+
+# AI context bundles
+.agents/
+gemini_context/
 
 
 # Local media folders
