@@ -447,3 +447,138 @@ def is_available() -> bool:
 def get_classification_mode() -> str:
     """Return the current classification mode."""
     return CLASSIFICATION_MODE
+
+
+# --- Layer 2: Text Repetition Detection (Worship Lyrics) ---
+
+import re
+import unicodedata
+from collections import Counter
+
+def _normalize_text(text: str) -> str:
+    """Normalize text for phrase comparison: lowercase, strip punctuation, collapse whitespace."""
+    if not text:
+        return ""
+    t = text.lower().strip()
+    # Remove dashes at start (dialogue markers)
+    t = re.sub(r'^-\s*', '', t)
+    # Remove all punctuation except apostrophes
+    t = re.sub(r"[^\w\s']", '', t)
+    # Collapse whitespace
+    t = re.sub(r'\s+', ' ', t).strip()
+    return t
+
+
+def detect_worship_by_repetition(
+    segments: List[dict],
+    window_size: int = 60,
+    min_occurrences: int = 3,
+    min_cluster_size: int = 5,
+) -> Tuple[List[dict], int]:
+    """
+    Detect worship/singing segments by text repetition patterns.
+
+    Worship lyrics repeat the same phrases many times within a short window.
+    Sermon speech almost never repeats identical phrases 3+ times.
+
+    Algorithm:
+        1. Normalize each segment's text
+        2. For each segment, count how many times its normalized text appears
+           within a window of ±window_size/2 segments
+        3. If a phrase appears >= min_occurrences times, mark those segments
+        4. Expand to contiguous clusters (bridge gaps of ≤2 unmarked segments)
+        5. Only keep clusters with >= min_cluster_size segments
+
+    Args:
+        segments: List of segment dicts with 'text', 'start', 'end'
+        window_size: Sliding window size in segments
+        min_occurrences: Minimum phrase repetitions to flag
+        min_cluster_size: Minimum consecutive segments to form a worship cluster
+
+    Returns:
+        Tuple of (modified segments with is_worship=True, count of flagged segments)
+    """
+    if not segments:
+        return segments, 0
+
+    # Skip segments already marked as audio events
+    n = len(segments)
+    normalized = []
+    for seg in segments:
+        if seg.get("is_audio_event"):
+            normalized.append("")
+        else:
+            normalized.append(_normalize_text(seg.get("text", "")))
+
+    # Phase 1: Mark segments whose normalized text repeats >= min_occurrences in window
+    raw_marks = [False] * n
+    half_w = window_size // 2
+
+    for i in range(n):
+        if not normalized[i] or len(normalized[i]) < 8:
+            # Skip very short phrases (Amen, Já, etc. — handled by interjection filter)
+            continue
+
+        # Count occurrences in window
+        w_start = max(0, i - half_w)
+        w_end = min(n, i + half_w + 1)
+        count = 0
+        for j in range(w_start, w_end):
+            if normalized[j] == normalized[i]:
+                count += 1
+
+        if count >= min_occurrences:
+            # Mark ALL segments with this phrase in the window
+            for j in range(w_start, w_end):
+                if normalized[j] == normalized[i]:
+                    raw_marks[j] = True
+
+    # Phase 2: Bridge small gaps (≤2 unmarked segments between marked ones)
+    bridged = list(raw_marks)
+    for i in range(n):
+        if not bridged[i]:
+            # Check if this is a small gap between marked segments
+            prev_marked = -1
+            next_marked = -1
+            for j in range(i - 1, max(-1, i - 4), -1):
+                if bridged[j]:
+                    prev_marked = j
+                    break
+            for j in range(i + 1, min(n, i + 4)):
+                if bridged[j]:
+                    next_marked = j
+                    break
+            if prev_marked >= 0 and next_marked >= 0 and (i - prev_marked) <= 3 and (next_marked - i) <= 3:
+                bridged[i] = True
+
+    # Phase 3: Identify contiguous clusters and filter by min_cluster_size
+    clusters = []
+    cluster_start = None
+    for i in range(n):
+        if bridged[i]:
+            if cluster_start is None:
+                cluster_start = i
+        else:
+            if cluster_start is not None:
+                clusters.append((cluster_start, i - 1))
+                cluster_start = None
+    if cluster_start is not None:
+        clusters.append((cluster_start, n - 1))
+
+    # Apply min_cluster_size filter
+    marked_count = 0
+    for c_start, c_end in clusters:
+        cluster_len = c_end - c_start + 1
+        if cluster_len >= min_cluster_size:
+            for i in range(c_start, c_end + 1):
+                seg = segments[i]
+                if not seg.get("is_audio_event") and not seg.get("is_worship"):
+                    seg["is_worship"] = True
+                    seg["worship_source"] = "text_repetition"
+                    seg["worship_phrase"] = normalized[i][:60] if normalized[i] else ""
+                    marked_count += 1
+
+    if marked_count > 0:
+        logger.info(f"🎵 Text repetition: {marked_count} segments in {len([c for c in clusters if c[1]-c[0]+1 >= min_cluster_size])} worship clusters")
+
+    return segments, marked_count

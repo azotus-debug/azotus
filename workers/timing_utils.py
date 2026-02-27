@@ -12,6 +12,7 @@ These utilities transform "good enough" timing into broadcast-quality timing.
 
 import json
 import logging
+import re
 import subprocess
 import shutil
 from pathlib import Path
@@ -21,8 +22,10 @@ import config
 from subtitle_standards import (
     DEFAULT_FRAMERATE,
     GAP_SECONDS,
+    MIN_DURATION,
     SCENE_THRESHOLD,
     SCENE_SNAP_WINDOW,
+    SCENE_SNAP_FRAMES,
     SPEECH_GAP_THRESHOLD,
 )
 
@@ -81,7 +84,10 @@ def quantize_events(events: list[dict], fps: float = DEFAULT_FRAMERATE) -> list[
         gap = result[i + 1]['start'] - result[i]['end']
         if gap < GAP_SECONDS:
             # Shorten current subtitle to create minimum gap
-            result[i]['end'] = snap_to_frame(result[i + 1]['start'] - GAP_SECONDS, fps)
+            new_end = snap_to_frame(result[i + 1]['start'] - GAP_SECONDS, fps)
+            # Safety: never let gap enforcement push end before/at start
+            min_end = result[i]['start'] + (2 / fps)  # 2 frames minimum duration
+            result[i]['end'] = max(new_end, min_end)
 
     return result
 
@@ -132,8 +138,32 @@ def detect_scene_cuts(
 
     logger.info(f"Detecting scene cuts in {video_path.name} (threshold={threshold})")
 
-    # FFmpeg scene detection filter
-    # This analyzes frame differences and outputs timestamps where cuts occur
+    # Try two methods: lavfi movie filter (fast, works for MOV/MP4),
+    # then direct input with select filter (works for MXF and all containers).
+    cuts = _detect_cuts_lavfi(video_path, threshold)
+    if not cuts:
+        logger.info(f"   lavfi method returned 0 cuts — trying direct input method for {video_path.suffix}")
+        cuts = _detect_cuts_direct(video_path, threshold)
+
+    logger.info(f"Detected {len(cuts)} scene cuts")
+
+    # Cache the results
+    if cache and cuts:
+        try:
+            with open(cache_path, 'w') as f:
+                json.dump({
+                    'threshold': threshold,
+                    'video': str(video_path),
+                    'cuts': cuts
+                }, f)
+        except Exception as e:
+            logger.warning(f"Failed to cache scene cuts: {e}")
+
+    return cuts
+
+
+def _detect_cuts_lavfi(video_path: Path, threshold: float) -> list[float]:
+    """Scene detection using lavfi movie filter (fast, but fails on MXF)."""
     cmd = [
         config.FFPROBE_BIN,
         "-v", "quiet",
@@ -143,52 +173,63 @@ def detect_scene_cuts(
         "-f", "lavfi",
         f"movie='{video_path}',select='gt(scene,{threshold})'"
     ]
-
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300  # 5 minute timeout
-        )
-
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         if result.returncode != 0:
-            logger.error(f"FFprobe scene detection failed: {result.stderr}")
             return []
+        return _parse_cut_timestamps(result.stdout)
+    except Exception as e:
+        logger.debug(f"lavfi scene detection failed: {e}")
+        return []
 
-        # Parse timestamps from output
+
+def _detect_cuts_direct(video_path: Path, threshold: float) -> list[float]:
+    """
+    Scene detection using direct ffmpeg input with select filter.
+    Works with MXF, MKV, and all containers that lavfi movie= can't handle.
+    Parses scene score from ffmpeg showinfo output.
+    """
+    cmd = [
+        config.FFMPEG_BIN,
+        "-i", str(video_path),
+        "-vf", f"select='gt(scene,{threshold})',showinfo",
+        "-vsync", "vfr",
+        "-f", "null",
+        "-"
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        # showinfo outputs to stderr
         cuts = []
-        for line in result.stdout.strip().split('\n'):
-            line = line.strip()
-            if line:
-                try:
-                    timestamp = float(line)
-                    cuts.append(timestamp)
-                except ValueError:
-                    continue
-
-        logger.info(f"Detected {len(cuts)} scene cuts")
-
-        # Cache the results
-        if cache:
-            try:
-                with open(cache_path, 'w') as f:
-                    json.dump({
-                        'threshold': threshold,
-                        'video': str(video_path),
-                        'cuts': cuts
-                    }, f)
-            except Exception as e:
-                logger.warning(f"Failed to cache scene cuts: {e}")
-
+        for line in result.stderr.split('\n'):
+            if 'pts_time:' in line:
+                # Parse: [Parsed_showinfo_1 ...] n:... pts:... pts_time:12.345 ...
+                match = re.search(r'pts_time:\s*([\d.]+)', line)
+                if match:
+                    try:
+                        cuts.append(float(match.group(1)))
+                    except ValueError:
+                        continue
         return cuts
-
     except subprocess.TimeoutExpired:
-        logger.error("Scene detection timed out")
+        logger.error("Direct scene detection timed out (10 min)")
         return []
     except Exception as e:
-        logger.error(f"Scene detection failed: {e}")
+        logger.debug(f"Direct scene detection failed: {e}")
         return []
+
+
+def _parse_cut_timestamps(stdout: str) -> list[float]:
+    """Parse float timestamps from ffprobe CSV output."""
+    cuts = []
+    for line in stdout.strip().split('\n'):
+        line = line.strip()
+        if line:
+            try:
+                cuts.append(float(line))
+            except ValueError:
+                continue
+    return cuts
 
 
 def get_speech_gaps(events: list[dict]) -> list[tuple[float, float]]:
@@ -297,6 +338,10 @@ def snap_to_scene_cuts(
                 return True
         return False
 
+    # Netflix 11-frame rule: snap window is 11 frames at the video's actual FPS
+    # This is more precise than a fixed 0.5s window
+    snap_window = SCENE_SNAP_FRAMES / fps  # e.g. 11/23.976 = 0.459s, 11/25 = 0.440s
+
     result = []
     for event in events:
         new_event = event.copy()
@@ -305,8 +350,8 @@ def snap_to_scene_cuts(
         for cut in scene_cuts:
             distance_to_start = cut - event['start']
 
-            # Cut is near the start and within snap window
-            if 0 < distance_to_start < SCENE_SNAP_WINDOW:
+            # Cut is near the start and within snap window (Netflix 11-frame rule)
+            if 0 < distance_to_start < snap_window:
                 # Only snap if the cut happens during a speech gap
                 # (i.e., we're not mid-sentence when the cut happens)
                 if is_in_speech_gap(cut) or not is_speech_active(cut, events):
@@ -324,17 +369,19 @@ def snap_to_scene_cuts(
         for cut in scene_cuts:
             distance_to_end = event['end'] - cut
 
-            # Cut is near the end and within snap window
-            if 0 < distance_to_end < SCENE_SNAP_WINDOW:
+            # Cut is near the end and within snap window (Netflix 11-frame rule)
+            if 0 < distance_to_end < snap_window:
                 # Only snap if the cut happens during a speech gap
                 if is_in_speech_gap(cut) or not is_speech_active(cut, events):
                     new_event['end'] = snap_to_frame(cut - (1 / fps), fps)  # End 1 frame before cut
                     logger.debug(f"Snapped subtitle end to scene cut at {cut:.3f}s")
                     break
 
-        # Ensure we didn't create an invalid event
-        if new_event['end'] <= new_event['start']:
-            new_event['end'] = new_event['start'] + (2 / fps)
+        # Ensure scene snap didn't create a subtitle shorter than MIN_DURATION.
+        # A bad snap (that squeezes a subtitle below readable length) is worse than no snap.
+        if new_event['end'] - new_event['start'] < MIN_DURATION:
+            new_event['start'] = event['start']
+            new_event['end'] = event['end']
 
         result.append(new_event)
 

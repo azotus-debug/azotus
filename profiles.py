@@ -34,25 +34,39 @@ LANGUAGES = {
             # ... (Full list from finalizer.py) ...
         },
         "base_prompt": """
-        1. THEOLOGICAL ACCURACY (Strict):
-           - God is addressed as "Þú".
-           - Do NOT use "Þér" for God.
-           - Humans/Friends are addressed as "Þú" (Casual).
-           - Never use "ég er" for God's title; use "ÉG ER".
-           
+        YOU ARE TRANSLATING INTO ICELANDIC FOR BROADCAST.
+        Your Icelandic must sound like it was originally written by an Icelandic broadcaster — 
+        not translated from English. Native speakers will read your text on screen.
+
+        1. THEOLOGICAL ACCURACY:
+           - God is addressed as "Þú" (NOT "Þér" — that is too archaic/formal).
+           - God's title "I AM" → "ÉG ER" (always capitalized).
+           - "Holy Spirit" → "Heilagur Andi" (capital A — a person of the Trinity).
+           - "Pastor" → "Prestur". "Saved" → "Frelsaður" (NOT "sparaður").
+           - DECLENSION RULE: Theological terms and proper nouns from the glossary MUST be actively declined according to Icelandic grammar rules (nominative, accusative, dative, genitive). Do NOT treat them as frozen strings. For example, "Heilagur Andi" must become "Heilagan Anda", "Heilögum Anda", or "Heilags Anda" depending on the context.
+
         2. SCRIPTURE PROTOCOL:
-           - Use **Biblían 2007**.
-           - If English speaker paraphrases, RECALL the official Icelandic verse.
-           
-        3. AVOID ANGLICISMS & ROBOTIC FLOW:
-           - "Died for you" -> "Dó vegna þín".
-           - "On fire" -> "Brennandi" (NOT "á eldi").
-           - **NATURAL FLOW**: Avoid literal "We have received/gotten" (Við höfum fengið) for weather or states. Use existential forms: "It has been/there is" (Það hefur verið / Það er).
-        
-        4. TERMINOLOGY:
-           - "Pastor" -> "Prestur".
-           - "Hallowed" -> "Heilagt" (NOT "halls", "halloween").
-           - "Hold" -> "Tak" or "Halda" (NOT "hole").
+           - Use **Biblían 2007** for all scripture.
+           - If the English speaker paraphrases, RECALL the official Icelandic verse from Biblían 2007.
+
+        3. ICELANDIC WORD ORDER AND FLOW:
+           - Icelandic is a V2 (verb-second) language. Restructure English SVO sentences accordingly.
+           - Prefer the middle voice (-st endings) over clunky passive constructions.
+             Example: "mættir frelsast" (middle) over "gætir verið frelsaður" (passive).
+           - Use existential forms for weather/states: "Það hefur rignt mikið" NOT "Við höfum fengið mikinn úrkomu."
+           - "Sama hvað þú hefur gert" is natural. "Það skiptir ekki máli hvað þú hefur gert" sounds like a textbook.
+           - TRANSLATING INTENT: Prioritize natural Icelandic syntactical flow and theological intent over 1-to-1 word matching for verb phrases. For example, "The Holy Spirit has equipped us" should naturally translate to "Heilagur Andi hefur útbúið okkur", not a direct literal translation like "Heilagur Andi býr okkur".
+
+        4. AVOID ANGLICISMS (critical):
+           - "Died for you" → "Dó vegna þín" (NOT "Dó fyrir þig").
+           - "On fire" → "Brennandi" (NOT "á eldi").
+           - "God is moving" → "Guð er að verka" (NOT "Guð er að hreyfast" — hreyfast is physical movement).
+           - If a phrase sounds like English wearing Icelandic clothes, rewrite it.
+
+        5. INTERJECTIONS:
+           - Congregation responses: "Amen", "Já", "Halelúja" — keep as-is.
+           - Pure filler (um, uh, yeah) → translate to closest natural equivalent ("Já", "Amen").
+           - NEVER return a bare period "." as a translation.
         """
     },
     "es": {
@@ -215,7 +229,7 @@ PROFILES = {
             "God": {"is": "Guð", "es": "Dios", "nl": "God"},
             "Jesus": {"is": "Jesús", "es": "Jesús", "nl": "Jezus"},
             "Jesus Christ": {"is": "Jesús Kristur", "es": "Jesucristo", "nl": "Jezus Christus"},
-            "Holy Spirit": {"is": "Heilagur andi", "es": "Espíritu Santo", "nl": "Heilige Geest"},
+            "Holy Spirit": {"is": "Heilagur Andi", "es": "Espíritu Santo", "nl": "Heilige Geest"},
             "Cross": {"is": "krossinn", "es": "la cruz", "nl": "het kruis"},
             "Salvation": {"is": "hjálpræði", "es": "salvación", "nl": "verlossing"},
             "Redemption": {"is": "endurlausn", "es": "redención", "nl": "verlossing"},
@@ -227,7 +241,17 @@ PROFILES = {
             "Sermon": {"is": "predikun", "es": "sermón", "nl": "preek"},
             "Sermons": {"is": "predikanir", "es": "sermones", "nl": "preken"},
             "Prayer": {"is": "bæn", "es": "oración", "nl": "gebed"},
-            "Faith": {"is": "trú", "es": "fe", "nl": "geloof"}
+            "Faith": {"is": "trú", "es": "fe", "nl": "geloof"},
+            # Worship terms (prevent synonym drift in repetitive lyrics)
+            "Worthy": {"is": "Verðugur", "es": "Digno", "nl": "Waardig"},
+            "Praise": {"is": "Lof", "es": "Alabanza", "nl": "Lof"},
+            "Yahweh": {"is": "Jahve", "es": "Yahvé", "nl": "Jahweh"},
+            "Hallelujah": {"is": "Halelúja", "es": "Aleluya", "nl": "Halleluja"},
+            "Worship": {"is": "Tilbeiðsla", "es": "Adoración", "nl": "Aanbidding"},
+            "Glory": {"is": "Dýrð", "es": "Gloria", "nl": "Glorie"},
+            "Throne": {"is": "Hásæti", "es": "Trono", "nl": "Troon"},
+            "Lamb of God": {"is": "Guðs Lamb", "es": "Cordero de Dios", "nl": "Lam van God"},
+            "Almighty": {"is": "Almáttugur", "es": "Todopoderoso", "nl": "Almachtige"},
         }
     },
     "in_touch": {
@@ -301,6 +325,201 @@ Tone: {profile['tone']}
 4. ASR CLEANUP: If the source contains an obvious speech-to-text error and the intended word is clear, fix it before translating. If unsure, keep the original wording."""
     
     return prompt
+
+
+def get_creative_system_instruction(lang_code="is", profile_key="standard", extra_terms=None):
+    """
+    Pass 1 (Creative) system instruction for Gemini Pro.
+
+    Now enhanced for Gemini 3.1 Pro to handle BOTH natural translation 
+    and mechanical constraints in a single pass.
+    """
+    lang = LANGUAGES.get(lang_code, LANGUAGES["is"])
+    profile = PROFILES.get(profile_key, PROFILES["standard"])
+
+    # Determine CPS based on language (copied from flash qa logic)
+    is_icelandic = lang_code.lower() == "is"
+    max_cps_val = 15 if is_icelandic else 17
+
+    # Build active glossary
+    active_glossary = {}
+    for term, translations in profile["glossary"].items():
+        if lang_code in translations:
+            active_glossary[term] = translations[lang_code]
+        else:
+            active_glossary[term] = term
+    if extra_terms and isinstance(extra_terms, dict):
+        active_glossary.update(extra_terms)
+
+    # Build few-shot examples based on language
+    few_shot = _get_creative_few_shot(lang_code)
+
+    prompt = f"""ROLE: You are a senior broadcast translator specializing in English-to-{lang['name']} localization for television subtitles. You have 20 years of experience translating live sermons, news programs, and documentaries for Omega TV.
+
+CURRENT PROGRAM: {profile['name']}
+TONE: {profile['tone']}
+
+YOUR PRIME DIRECTIVE:
+Produce natural, flowing {lang['name']} that sounds like it was originally spoken in {lang['name']}. The viewer should never feel they are reading a translation. Every subtitle must read as something a native {lang['name']} speaker would actually say in that context.
+
+WHAT MAKES A GREAT TRANSLATION:
+- Captures the MEANING and EMOTION, not just the words
+- Uses idiomatic expressions natural to {lang['name']}
+- Matches the speaker's register (formal sermon vs casual conversation vs urgent news)
+- Preserves rhetorical devices (repetition for emphasis, parallel structure, building tension)
+- Adapts cultural references when the literal version would confuse the viewer
+- Theological terms are precise and consistent (see glossary below)
+
+WHAT MAKES A BAD TRANSLATION (avoid these):
+- Word-for-word "translationese" that reads like a textbook
+- Passive constructions copied from English when {lang['name']} prefers active voice
+- English word order forced onto {lang['name']} sentence structure
+- Flat, lifeless phrasing that loses the speaker's passion and urgency
+- Inconsistent terminology (using different words for the same concept)
+- Over-literal rendering of idioms ("on fire" → literal fire instead of passionate)
+
+{few_shot}
+
+--- LANGUAGE-SPECIFIC RULES ---
+{lang['base_prompt']}
+
+--- GLOSSARY (use these terms consistently) ---
+{json.dumps(active_glossary, indent=2, ensure_ascii=False)}
+
+--- CONTENT RULES ---
+1. NEVER omit, censor, or soften any content. This is professional broadcast material.
+2. Translate ALL segments faithfully — violence, politics, sensitive topics included.
+3. NEVER drop theological meaning: God, Jesus Christ, Holy Spirit, salvation, grace, sin.
+4. Short interjections ("Amen", "Já", "Halelúja") stay as-is.
+5. If the source has an obvious speech-to-text error and the intended word is clear, fix it.
+6. MUSIC: If a segment is purely singing with no speech, output `{lang['music_prompt']}`.
+7. Use normal sentence case (not ALL CAPS). Preserve acronyms and theological titles (ÉG ER).
+
+--- STRICT BROADCAST CONSTRAINTS ---
+Because you are generating the final subtitles, you MUST adhere to the following absolute limits. Do NOT sacrifice natural phrasing, but YOU MUST COMPRESS the text to fit if it's too long.
+1. CHARACTER LIMITS: Maximum 42 characters per line. Maximum 2 lines per subtitle.
+2. READING SPEED (CPS): Max {max_cps_val} characters per second. The input will provide a "max_chars" budget for each segment based on its duration. You MUST keep the length of your translation under this budget.
+3. LINE BREAKS: Break lines at natural clause boundaries. NEVER break names, theological titles, or prepositional phrases.
+4. COMPLETENESS: Translate every single segment provided. Keep the exact same JSON array structure."""
+
+    return prompt
+
+
+def get_flash_qa_instruction(lang_code="is"):
+    """
+    Pass 2 (QA) system instruction for Gemini Flash.
+
+    This prompt is STRICTLY mechanical:
+    - Enforce character limits (42 chars per line, 2 lines max)
+    - Enforce CPS constraints
+    - Fix artifacts (double-dots, concatenation, name-bleed)
+    - Verify glossary consistency
+    - Verify segment completeness (no blanks, no missing IDs)
+
+    CRITICAL: Flash must NOT re-translate or change the style/register.
+    Its job is to trim and format, preserving Pro's natural phrasing.
+    """
+    lang = LANGUAGES.get(lang_code, LANGUAGES["is"])
+    is_icelandic = lang_code.lower() == "is"
+    max_cps = 15 if is_icelandic else 17
+
+    prompt = f"""ROLE: You are a broadcast subtitle QA editor. Your job is to take professionally translated {lang['name']} subtitles and ensure they meet strict technical broadcast specifications.
+
+YOU ARE NOT A TRANSLATOR. Do not re-translate. Do not change meaning. Do not rewrite for style. Your ONLY job is mechanical formatting and constraint enforcement.
+
+--- RULES (enforce in this order) ---
+
+RULE 1: CHARACTER LIMITS
+- Maximum 42 characters per line.
+- Maximum 2 lines per subtitle.
+- If a translation exceeds 42 characters on any line, you MUST shorten it.
+- When shortening: remove filler words, use shorter synonyms, compress phrasing.
+- CRITICAL: When shortening, preserve the natural {lang['name']} idiom. Do NOT revert to a more literal/flat translation just to save characters. Find a concise way to say the SAME natural thing.
+
+RULE 2: CPS (Characters Per Second)
+- Each segment has a duration and max_chars budget.
+- Translation text length MUST be ≤ max_chars for that segment.
+- If over budget: cut fillers first, then non-essential adjectives. NEVER cut theological meaning.
+
+RULE 3: LINE BREAKS
+- If a subtitle needs 2 lines, break at a natural clause boundary.
+- NEVER break in the middle of: a proper name, a theological title ("Heilagur Andi", "ÉG ER"), or a prepositional phrase.
+- No line should end with a dangling preposition (á, í, um, til, við, frá, með, af, eftir, gegn).
+
+RULE 4: ARTIFACT CLEANUP
+- Double-dots ("..") → single dot (".") or proper ellipsis ("...")
+- Missing period between sentences → add period
+- Leading dots or dashes (".. text", "- .text") → clean text
+- Spurious spaces before punctuation → remove
+
+RULE 5: COMPLETENESS
+- Every input segment MUST appear in output with the same ID.
+- No blank translations. If the original is blank, flag it but keep the ID.
+- No missing IDs, no duplicate IDs.
+
+RULE 6: CAPITALIZATION
+- Use normal sentence case.
+- Preserve acronyms (USA, TV), Bible abbreviations (1. Kor.), and theological titles (ÉG ER).
+- Proper nouns must be capitalized.
+
+--- WHAT YOU MUST NOT DO ---
+- Do NOT change correct translations for style preference.
+- Do NOT re-translate from English. You only see {lang['name']} text + English source for reference.
+- Do NOT upgrade or downgrade the register. The translator chose the register deliberately.
+- Do NOT add information not present in the translation.
+- Do NOT remove meaningful content — only trim filler/redundancy when forced by char limits.
+- The English source is provided ONLY for alignment verification and glossary checking. Do NOT use it to re-translate.
+
+MAX CPS: {max_cps} (hard limit for {lang['name']})."""
+
+    return prompt
+
+
+def _get_creative_few_shot(lang_code="is"):
+    """
+    Returns few-shot translation examples for the creative prompt.
+    Shows the model what GOOD vs BAD translations look like.
+    """
+    if lang_code == "is":
+        return """--- FEW-SHOT EXAMPLES (Good vs Bad) ---
+
+Example 1 — Idiomatic contraction:
+  English: "It doesn't matter what you've done, the Lord can forgive you."
+  ❌ BAD (literal): "Það skiptir ekki máli hvað þú hefur gert, Drottinn getur fyrirgefið þér."
+  ✅ GOOD (natural): "Sama hvað þú hefur gert, Drottinn fyrirgefur."
+  WHY: "Sama hvað" is how Icelanders actually speak. The bad version is grammatically correct but sounds like a textbook.
+
+Example 2 — Avoiding anglicisms:
+  English: "We have received a lot of rain this year."
+  ❌ BAD (anglicism): "Við höfum fengið mikinn úrkomu í ár."
+  ✅ GOOD (natural): "Það hefur rignt mikið í ár."
+  WHY: Icelandic uses existential "Það hefur..." for weather/states, not "Við höfum fengið..." which is a direct English calque.
+
+Example 3 — Register and passion:
+  English: "God is moving in this place right now! Can you feel it?"
+  ❌ BAD (flat): "Guð er að hreyfast á þessum stað núna. Finnurðu fyrir því?"
+  ✅ GOOD (passionate): "Guð er að verka hér og nú! Finnið þið það?"
+  WHY: "Verka" (work/act) captures the spiritual meaning better than literal "hreyfast" (physically move). "Hér og nú" is punchy. The plural "Finnið þið" matches a preacher addressing a congregation.
+
+Example 4 — Theological precision:
+  English: "He died for your sins so that you might be saved."
+  ❌ BAD (awkward): "Hann dó fyrir syndirnar þínar svo að þú gætir verið frelsaður."
+  ✅ GOOD (natural): "Hann dó vegna synda þinna svo þú mættir frelsast."
+  WHY: "Vegna synda þinna" is the natural Icelandic theological phrasing. "Mættir frelsast" uses the middle voice which is more natural than passive "gætir verið frelsaður".
+
+Example 5 — News register:
+  English: "Israeli forces carried out strikes on multiple targets in southern Lebanon."
+  ❌ BAD (stilted): "Ísraelskar hersveitir framkvæmdu loftárásir á fjölmörg skotmörk í suðurhluta Líbanon."
+  ✅ GOOD (broadcast): "Ísraelsher réðst á fjölda skotmarka í Suður-Líbanon."
+  WHY: Icelandic news language is direct and compact. "Réðst á" (attacked) is more natural than "framkvæmdu loftárásir" (carried out strikes). "Suður-Líbanon" is the standard compound form."""
+
+    # Default for other languages — generic examples
+    return f"""--- TRANSLATION QUALITY GUIDANCE ---
+- Translate meaning, not words. Produce natural {LANGUAGES.get(lang_code, LANGUAGES['is'])['name']}.
+- Avoid literal word-for-word translation that sounds unnatural.
+- Match the speaker's register and emotion.
+- Use idiomatic expressions natural to the target language."""
+
 
 # --- 3. THE POLITICS (Delivery Policies) ---
 # Defaults for Dubbing vs. Subtitling based on region.
