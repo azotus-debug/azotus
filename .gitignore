@@ -26,6 +26,9 @@ tests/v8_chunk_test_result.json
 .agents/
 gemini_context/
 
+# Codex rollout-gate snapshots (91MB+)
+docs/stabilization/artifacts/
+
 
 # Local media folders
 1_INBOX/
