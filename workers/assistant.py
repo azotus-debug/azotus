@@ -310,11 +310,11 @@ def _apply_corrections(segments: List[Dict], corrections: List[Dict]) -> List[Di
     Applies edits. 
     corrections = [ { "id": 1, "text": "New" }, { "id": 2, "delete": true } ]
     """
-    correction_map = {c["id"]: c for c in corrections}
+    correction_map = {str(c["id"]): c for c in corrections}
     new_list = []
     
     for seg in segments:
-        seg_id = int(seg.get("id", -1))
+        seg_id = str(seg.get("id", ""))
         if seg_id in correction_map:
             change = correction_map[seg_id]
             if change.get("delete"):

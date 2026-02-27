@@ -18,7 +18,7 @@
 
 ## Translation Prompts
 
-### Step 1: Literary Translator (Gemini 3 Pro)
+### Step 1: Literary Translator (Gemini 3.1 Pro)
 
 **Purpose:** Create a faithful, contextually-aware base translation that preserves meaning, tone, and narrative flow.
 
@@ -81,7 +81,7 @@ Translate the above chapter into Icelandic, following all guidelines.
 
 ---
 
-### Step 2: Theological Reviewer (Gemini 3 Pro)
+### Step 2: Theological Reviewer (Gemini 3.1 Pro)
 
 **Purpose:** Ensure doctrinal accuracy, correct Scripture handling, and alignment with ministry voice.
 

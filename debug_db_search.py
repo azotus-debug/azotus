@@ -7,40 +7,31 @@ sys.path.append(os.getcwd())
 
 try:
     import omega_db
+    import config
     
-    print("--- SEARCHING FOR CBNJD020326CC ---")
+    target = sys.argv[1] if len(sys.argv) > 1 else "CBNJD020326CC"
+    print(f"--- SEARCHING FOR {target} ---")
     
     # helper to print track
     def print_track(t):
-        print(f"FOUND: ID={t.get('job_id')} | Stage={t.get('stage')} | Status={t.get('status')} | ProgID={t.get('program_id')}")
+        # omega_db._job_dict_from_track_row returns 'file_stem', not 'job_id'
+        job_id = t.get('file_stem') or t.get('job_id')
+        print(f"FOUND: ID={job_id} | Stage={t.get('stage')} | Status={t.get('status')} | ProgID={t.get('program_id')}")
 
     # 1. Try get_track_by_job with variations
-    target = "CBNJD020326CC"
     vars = [target, target.lower(), target.upper()]
     
+    found = False
     for v in vars:
-        t = omega_db.get_track_by_job(v)
+        t = omega_db.get_job(v)  # try get_job first as it's the main accessor
         if t: 
             print_track(t)
+            found = True
+            break
             
-    # 2. List all programs and check titles
-    # Assuming get_all_programs or similar exists. 
-    # If not, we might have to rely on get_program_by_original_filename if we knew it.
-    
-    # Let's try to list recent via raw connection if module allows, OR just try to find based on title
-    p = omega_db.get_program_by_title(target)
-    if p:
-        print(f"FOUND PROGRAM: {p['id']} - {p.get('title')}")
-        tracks = omega_db.get_tracks_for_program(p['id'])
-        for t in tracks:
-            print_track(t)
-            
-    # 3. Last ditch: try to list *all* recent tracks by guessing IDs? No.
-    # Let's try to query the DB file referenced in defaults.py/config.py if we can find it.
-    # Actually, let's just inspect what `omega_db` uses.
-    
-    print("\n--- CONFIG CHECK ---")
-    import config
+    if not found:
+        print(f"No job found for {target} via get_job()")
+        
     print(f"DB Config: {getattr(config, 'OMEGA_DB_PATH', 'Unknown')}")
     
 except Exception as e:
