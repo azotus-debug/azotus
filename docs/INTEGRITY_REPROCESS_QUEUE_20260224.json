@@ -1,0 +1,383 @@
+{
+  "generated_at": "2026-02-24T14:16:08.789676",
+  "checked": 24,
+  "suspicious_total": 11,
+  "suspicious_active": 0,
+  "suspicious_terminal": 11,
+  "jobs": [
+    {
+      "job_id": "cbnjd021026cc-20260211T024121878703Z",
+      "path": "3_TRANSLATED_DONE/cbnjd021026cc-20260211T024121878703Z_APPROVED.json",
+      "target_language": "is",
+      "stage": "COMPLETED",
+      "status": "Done",
+      "is_terminal": true,
+      "t_ratio": 0.0016456390565002743,
+      "letters": 10938,
+      "t_count": 18,
+      "reason": "low t-ratio (0.001646 < 0.010000) across 10938 letters",
+      "integrity": {
+        "enabled": true,
+        "language": "is",
+        "suspicious": true,
+        "reason": "low t-ratio (0.001646 < 0.010000) across 10938 letters",
+        "thresholds": {
+          "min_letters": 3000,
+          "min_t_ratio": 0.01
+        },
+        "text": {
+          "char_count": 13996,
+          "letter_count": 10938,
+          "t_count": 18,
+          "t_ratio": 0.0016456390565002743
+        },
+        "source": {
+          "char_count": 251,
+          "letter_count": 0,
+          "t_count": 0,
+          "t_ratio": 0.0
+        }
+      }
+    },
+    {
+      "job_id": "cbnjd021326cc-20260217T170011040479Z",
+      "path": "3_TRANSLATED_DONE/cbnjd021326cc-20260217T170011040479Z_APPROVED.json",
+      "target_language": "is",
+      "stage": "COMPLETED",
+      "status": "Done",
+      "is_terminal": true,
+      "t_ratio": 0.0015914064054107818,
+      "letters": 15081,
+      "t_count": 24,
+      "reason": "low t-ratio (0.001591 < 0.010000) across 15081 letters",
+      "integrity": {
+        "enabled": true,
+        "language": "is",
+        "suspicious": true,
+        "reason": "low t-ratio (0.001591 < 0.010000) across 15081 letters",
+        "thresholds": {
+          "min_letters": 3000,
+          "min_t_ratio": 0.01
+        },
+        "text": {
+          "char_count": 19428,
+          "letter_count": 15081,
+          "t_count": 24,
+          "t_ratio": 0.0015914064054107818
+        },
+        "source": {
+          "char_count": 550,
+          "letter_count": 0,
+          "t_count": 0,
+          "t_ratio": 0.0
+        }
+      }
+    },
+    {
+      "job_id": "cbnjd022026cc-20260220T223657666491Z",
+      "path": "3_TRANSLATED_DONE/cbnjd022026cc-20260220T223657666491Z_APPROVED.json",
+      "target_language": "is",
+      "stage": "COMPLETED",
+      "status": "Done",
+      "is_terminal": true,
+      "t_ratio": 0.0018259882544539308,
+      "letters": 20263,
+      "t_count": 37,
+      "reason": "low t-ratio (0.001826 < 0.010000) across 20263 letters",
+      "integrity": {
+        "enabled": true,
+        "language": "is",
+        "suspicious": true,
+        "reason": "low t-ratio (0.001826 < 0.010000) across 20263 letters",
+        "thresholds": {
+          "min_letters": 3000,
+          "min_t_ratio": 0.01
+        },
+        "text": {
+          "char_count": 26201,
+          "letter_count": 20263,
+          "t_count": 37,
+          "t_ratio": 0.0018259882544539308
+        },
+        "source": {
+          "char_count": 618,
+          "letter_count": 0,
+          "t_count": 0,
+          "t_ratio": 0.0
+        }
+      }
+    },
+    {
+      "job_id": "hop_2921_int57-20260218T021948446615Z",
+      "path": "3_TRANSLATED_DONE/hop_2921_int57-20260218T021948446615Z_APPROVED.json",
+      "target_language": "is",
+      "stage": "COMPLETED",
+      "status": "Done",
+      "is_terminal": true,
+      "t_ratio": 0.0014884644008930786,
+      "letters": 24186,
+      "t_count": 36,
+      "reason": "low t-ratio (0.001488 < 0.010000) across 24186 letters",
+      "integrity": {
+        "enabled": true,
+        "language": "is",
+        "suspicious": true,
+        "reason": "low t-ratio (0.001488 < 0.010000) across 24186 letters",
+        "thresholds": {
+          "min_letters": 3000,
+          "min_t_ratio": 0.01
+        },
+        "text": {
+          "char_count": 33119,
+          "letter_count": 24186,
+          "t_count": 36,
+          "t_ratio": 0.0014884644008930786
+        },
+        "source": {
+          "char_count": 1280,
+          "letter_count": 0,
+          "t_count": 0,
+          "t_ratio": 0.0
+        }
+      }
+    },
+    {
+      "job_id": "i2608_iceland-20260219T220753150282Z",
+      "path": "3_TRANSLATED_DONE/i2608_iceland-20260219T220753150282Z_APPROVED.json",
+      "target_language": "is",
+      "stage": "COMPLETED",
+      "status": "Done",
+      "is_terminal": true,
+      "t_ratio": 0.002029132545836655,
+      "letters": 13799,
+      "t_count": 28,
+      "reason": "low t-ratio (0.002029 < 0.010000) across 13799 letters",
+      "integrity": {
+        "enabled": true,
+        "language": "is",
+        "suspicious": true,
+        "reason": "low t-ratio (0.002029 < 0.010000) across 13799 letters",
+        "thresholds": {
+          "min_letters": 3000,
+          "min_t_ratio": 0.01
+        },
+        "text": {
+          "char_count": 18099,
+          "letter_count": 13799,
+          "t_count": 28,
+          "t_ratio": 0.002029132545836655
+        },
+        "source": {
+          "char_count": 489,
+          "letter_count": 0,
+          "t_count": 0,
+          "t_ratio": 0.0
+        }
+      }
+    },
+    {
+      "job_id": "i2609_intluk_h264-1080p25-aac-20260209T143921020003Z",
+      "path": "3_TRANSLATED_DONE/i2609_intluk_h264-1080p25-aac-20260209T143921020003Z_APPROVED.json",
+      "target_language": "is",
+      "stage": "COMPLETED",
+      "status": "Done",
+      "is_terminal": true,
+      "t_ratio": 0.0014318200960161712,
+      "letters": 11873,
+      "t_count": 17,
+      "reason": "low t-ratio (0.001432 < 0.010000) across 11873 letters",
+      "integrity": {
+        "enabled": true,
+        "language": "is",
+        "suspicious": true,
+        "reason": "low t-ratio (0.001432 < 0.010000) across 11873 letters",
+        "thresholds": {
+          "min_letters": 3000,
+          "min_t_ratio": 0.01
+        },
+        "text": {
+          "char_count": 15337,
+          "letter_count": 11873,
+          "t_count": 17,
+          "t_ratio": 0.0014318200960161712
+        },
+        "source": {
+          "char_count": 321,
+          "letter_count": 0,
+          "t_count": 0,
+          "t_ratio": 0.0
+        }
+      }
+    },
+    {
+      "job_id": "i2610_intluk_h264-1080p25-aac-20260209T205555971614Z",
+      "path": "3_TRANSLATED_DONE/i2610_intluk_h264-1080p25-aac-20260209T205555971614Z_APPROVED.json",
+      "target_language": "is",
+      "stage": "COMPLETED",
+      "status": "Done",
+      "is_terminal": true,
+      "t_ratio": 0.001180130887243858,
+      "letters": 9321,
+      "t_count": 11,
+      "reason": "low t-ratio (0.001180 < 0.010000) across 9321 letters",
+      "integrity": {
+        "enabled": true,
+        "language": "is",
+        "suspicious": true,
+        "reason": "low t-ratio (0.001180 < 0.010000) across 9321 letters",
+        "thresholds": {
+          "min_letters": 3000,
+          "min_t_ratio": 0.01
+        },
+        "text": {
+          "char_count": 12121,
+          "letter_count": 9321,
+          "t_count": 11,
+          "t_ratio": 0.001180130887243858
+        },
+        "source": {
+          "char_count": 232,
+          "letter_count": 0,
+          "t_count": 0,
+          "t_ratio": 0.0
+        }
+      }
+    },
+    {
+      "job_id": "the_brides_revival_-_joe_sweet_pt_1_-_56min-20260212T014851023059Z",
+      "path": "3_TRANSLATED_DONE/the_brides_revival_-_joe_sweet_pt_1_-_56min-20260212T014851023059Z_APPROVED.json",
+      "target_language": "is",
+      "stage": "COMPLETED",
+      "status": "Done",
+      "is_terminal": true,
+      "t_ratio": 0.0013419316360383197,
+      "letters": 26827,
+      "t_count": 36,
+      "reason": "low t-ratio (0.001342 < 0.010000) across 26827 letters",
+      "integrity": {
+        "enabled": true,
+        "language": "is",
+        "suspicious": true,
+        "reason": "low t-ratio (0.001342 < 0.010000) across 26827 letters",
+        "thresholds": {
+          "min_letters": 3000,
+          "min_t_ratio": 0.01
+        },
+        "text": {
+          "char_count": 37722,
+          "letter_count": 26827,
+          "t_count": 36,
+          "t_ratio": 0.0013419316360383197
+        },
+        "source": {
+          "char_count": 1492,
+          "letter_count": 0,
+          "t_count": 0,
+          "t_ratio": 0.0
+        }
+      }
+    },
+    {
+      "job_id": "timessquarechurch_20260201-20260211T170431090524Z",
+      "path": "3_TRANSLATED_DONE/timessquarechurch_20260201-20260211T170431090524Z_APPROVED.json",
+      "target_language": "is",
+      "stage": "COMPLETED",
+      "status": "Done",
+      "is_terminal": true,
+      "t_ratio": 0.002249569935159455,
+      "letters": 30228,
+      "t_count": 68,
+      "reason": "low t-ratio (0.002250 < 0.010000) across 30228 letters",
+      "integrity": {
+        "enabled": true,
+        "language": "is",
+        "suspicious": true,
+        "reason": "low t-ratio (0.002250 < 0.010000) across 30228 letters",
+        "thresholds": {
+          "min_letters": 3000,
+          "min_t_ratio": 0.01
+        },
+        "text": {
+          "char_count": 39823,
+          "letter_count": 30228,
+          "t_count": 68,
+          "t_ratio": 0.002249569935159455
+        },
+        "source": {
+          "char_count": 1148,
+          "letter_count": 0,
+          "t_count": 0,
+          "t_ratio": 0.0
+        }
+      }
+    },
+    {
+      "job_id": "timessquarechurch_20260215-20260221T205201457054Z",
+      "path": "3_TRANSLATED_DONE/timessquarechurch_20260215-20260221T205201457054Z_APPROVED.json",
+      "target_language": "is",
+      "stage": "COMPLETED",
+      "status": "Done",
+      "is_terminal": true,
+      "t_ratio": 0.0009417394181577541,
+      "letters": 39289,
+      "t_count": 37,
+      "reason": "low t-ratio (0.000942 < 0.010000) across 39289 letters",
+      "integrity": {
+        "enabled": true,
+        "language": "is",
+        "suspicious": true,
+        "reason": "low t-ratio (0.000942 < 0.010000) across 39289 letters",
+        "thresholds": {
+          "min_letters": 3000,
+          "min_t_ratio": 0.01
+        },
+        "text": {
+          "char_count": 51913,
+          "letter_count": 39289,
+          "t_count": 37,
+          "t_ratio": 0.0009417394181577541
+        },
+        "source": {
+          "char_count": 1060,
+          "letter_count": 0,
+          "t_count": 0,
+          "t_ratio": 0.0
+        }
+      }
+    },
+    {
+      "job_id": "vital_-_bjarki_clausen_rir_vi_simon_braker_-_februar_2026-20260216T184559755691Z",
+      "path": "3_TRANSLATED_DONE/vital_-_bjarki_clausen_rir_vi_simon_braker_-_februar_2026-20260216T184559755691Z_APPROVED.json",
+      "target_language": "is",
+      "stage": "COMPLETED",
+      "status": "Done",
+      "is_terminal": true,
+      "t_ratio": 0.0006005104338687885,
+      "letters": 19983,
+      "t_count": 12,
+      "reason": "low t-ratio (0.000601 < 0.010000) across 19983 letters",
+      "integrity": {
+        "enabled": true,
+        "language": "is",
+        "suspicious": true,
+        "reason": "low t-ratio (0.000601 < 0.010000) across 19983 letters",
+        "thresholds": {
+          "min_letters": 3000,
+          "min_t_ratio": 0.01
+        },
+        "text": {
+          "char_count": 27598,
+          "letter_count": 19983,
+          "t_count": 12,
+          "t_ratio": 0.0006005104338687885
+        },
+        "source": {
+          "char_count": 1035,
+          "letter_count": 0,
+          "t_count": 0,
+          "t_ratio": 0.0
+        }
+      }
+    }
+  ]
+}
