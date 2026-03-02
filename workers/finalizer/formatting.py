@@ -104,21 +104,84 @@ def split_into_balanced_lines(text: str, target_language: str = "is") -> List[st
     """
     Netflix/BBC preference: two balanced shorter lines are easier to read 
     than one long line. Split any subtitle longer than 42 chars into lines.
+    
+    Semantic Line Breaking Rules (Icelandic focused):
+    1. Try to break at punctuation (, . ! ?).
+    2. Avoid breaking immediately after a preposition or conjunction (if possible).
+    3. Try to balance line lengths.
     """
     TWO_LINE_THRESHOLD = 35
     if len(text) <= TWO_LINE_THRESHOLD:
         return [text]
 
+    # Cleaned string
+    text = text.strip()
     middle = len(text) // 2
-    
-    # Simple split attempt near middle
-    split_pos = text.rfind(' ', 0, middle + 10)
-    if split_pos <= 5:
-        # If no good space found backwards, search forwards
-        split_pos = text.find(' ', middle)
+
+    # Semantic non-breaking suffixes (Icelandic)
+    # Don't break immediately AFTER these words if we can avoid it.
+    no_break_after = {
+        "og", "eða", "en", "að", "sem", "því", "svo",
+        "í", "á", "við", "um", "til", "frá", "með", "af", "fyrir", "án", "að"
+    }
+
+    # Helper to score a potential split position
+    def score_split(pos: int) -> float:
+        if pos <= 0 or pos >= len(text):
+            return -1000.0
+            
+        score = 0.0
         
-    if split_pos > 0:
-        lines = [text[:split_pos].strip(), text[split_pos:].strip()]
+        # 1. Punctuation gets high score (breaking AFTER punctuation is great)
+        if pos > 0 and text[pos-1] in {',', '.', ';', '?', '!', ':'}:
+            score += 50.0
+            
+        # 2. Distance from middle (closer is better, but punctuation can override)
+        distance = abs(middle - pos)
+        score -= distance * 0.5 
+        
+        # Get the word immediately before the split and immediately after
+        left_part = text[:pos].strip()
+        right_part = text[pos:].strip()
+        
+        word_before = left_part.split()[-1].lower() if left_part else ""
+        word_after = right_part.split()[0].lower() if right_part else ""
+        
+        # 3. Avoid orphaned prepositions/conjunctions at the end of line 1 (breaking AFTER them)
+        if word_before in no_break_after:
+            score -= 40.0
+            
+        # 4. Try to keep specific adjective + noun phrases together.
+        # "víðs vegar", "frábært starf", "að minnsta kosti"
+        if word_before == "víðs" and word_after == "vegar": score -= 50.0
+        if word_before == "að" and word_after == "minnsta": score -= 50.0
+            
+        return score
+
+    # Find all space positions
+    space_positions = [i for i, char in enumerate(text) if char == ' ']
+    
+    if not space_positions:
+        return [text] # No spaces, can't split
+
+    # Find the best split point based on semantic scoring
+    best_pos = -1
+    best_score = -float('inf')
+    
+    for pos in space_positions:
+        # Don't split too close to edges (e.g. at least 10 chars per line if possible)
+        if pos < 10 or pos > len(text) - 10:
+            # We still consider them, but with a severe penalty unless forced
+            s = score_split(pos) - 100.0
+        else:
+            s = score_split(pos)
+            
+        if s > best_score:
+            best_score = s
+            best_pos = pos
+
+    if best_pos > 0:
+        lines = [text[:best_pos].strip(), text[best_pos:].strip()]
     else:
         # Fallback if no spaces
         lines = [text]
@@ -131,6 +194,7 @@ def split_into_balanced_lines(text: str, target_language: str = "is") -> List[st
             continue
             
         while len(remainder) > MAX_CHARS_PER_LINE:
+            # Revert to math fallback for extreme overflow inside chunks
             spos = remainder.rfind(' ', 0, MAX_CHARS_PER_LINE + 1)
             if spos <= 10:
                 spos = MAX_CHARS_PER_LINE
@@ -147,16 +211,8 @@ def split_into_balanced_lines(text: str, target_language: str = "is") -> List[st
         joined = " ".join(final_lines).strip()
         condensed = abbreviate_bible_refs(joined, target_language)
         if len(condensed) < len(joined):
-            # Abbreviation helped, re-run simple split
-            if len(condensed) <= MAX_CHARS_PER_LINE:
-                return [condensed]
-            mid = len(condensed) // 2
-            spos = condensed.rfind(' ', 0, mid + 10)
-            if spos <= 5: spos = condensed.find(' ', mid)
-            if spos > 0:
-                c_lines = [condensed[:spos].strip(), condensed[spos:].strip()]
-                if all(len(l) <= MAX_CHARS_PER_LINE for l in c_lines):
-                    return c_lines
+            # Abbreviation helped, re-run split (just call self)
+            return split_into_balanced_lines(condensed, target_language)
                     
         # Fold overflow
         overflow = " ".join(final_lines[MAX_LINES - 1:]).strip()
