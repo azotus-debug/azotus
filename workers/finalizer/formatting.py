@@ -119,10 +119,16 @@ def split_into_balanced_lines(text: str, target_language: str = "is") -> List[st
     middle = len(text) // 2
 
     # Semantic non-breaking suffixes (Icelandic)
-    # Don't break immediately AFTER these words if we can avoid it.
+    # NUCLEAR BAN: Never break immediately AFTER these words.
+    # Expanded to cover all Icelandic prepositions and conjunctions.
     no_break_after = {
-        "og", "eða", "en", "að", "sem", "því", "svo",
-        "í", "á", "við", "um", "til", "frá", "með", "af", "fyrir", "án", "að"
+        # Conjunctions
+        "og", "eða", "en", "að", "sem", "því", "svo", "er",
+        # Prepositions
+        "í", "á", "við", "um", "til", "frá", "með", "af", "fyrir", "án",
+        "yfir", "undir", "eftir", "gegn", "hjá", "milli", "meðal",
+        # Articles / particles that shouldn't dangle
+        "hinn", "hin", "hið",
     }
 
     # Helper to score a potential split position
@@ -147,14 +153,22 @@ def split_into_balanced_lines(text: str, target_language: str = "is") -> List[st
         word_before = left_part.split()[-1].lower() if left_part else ""
         word_after = right_part.split()[0].lower() if right_part else ""
         
-        # 3. Avoid orphaned prepositions/conjunctions at the end of line 1 (breaking AFTER them)
+        # 3. NUCLEAR BAN: Never orphan prepositions/conjunctions at end of line 1
         if word_before in no_break_after:
-            score -= 40.0
+            score -= 999.0
             
         # 4. Try to keep specific adjective + noun phrases together.
         # "víðs vegar", "frábært starf", "að minnsta kosti"
         if word_before == "víðs" and word_after == "vegar": score -= 50.0
         if word_before == "að" and word_after == "minnsta": score -= 50.0
+            
+        # 5. Strongly penalize if either chunk exceeds MAX_CHARS_PER_LINE
+        left_len = pos
+        right_len = len(text) - pos
+        if left_len > MAX_CHARS_PER_LINE:
+            score -= (left_len - MAX_CHARS_PER_LINE) * 20.0
+        if right_len > MAX_CHARS_PER_LINE:
+            score -= (right_len - MAX_CHARS_PER_LINE) * 20.0
             
         return score
 
@@ -182,6 +196,12 @@ def split_into_balanced_lines(text: str, target_language: str = "is") -> List[st
 
     if best_pos > 0:
         lines = [text[:best_pos].strip(), text[best_pos:].strip()]
+        # If any resulting semantic split STILL exceeds the max lines (e.g. 42 chars + 43 chars = 85 total length)
+        # We must discard the semantic split lines array and just let the while-loop math fallback handle the raw text.
+        for l in lines:
+            if len(l) > MAX_CHARS_PER_LINE:
+                lines = [text] 
+                break
     else:
         # Fallback if no spaces
         lines = [text]
@@ -196,8 +216,21 @@ def split_into_balanced_lines(text: str, target_language: str = "is") -> List[st
         while len(remainder) > MAX_CHARS_PER_LINE:
             # Revert to math fallback for extreme overflow inside chunks
             spos = remainder.rfind(' ', 0, MAX_CHARS_PER_LINE + 1)
-            if spos <= 10:
+            
+            # Semantic edge case: if we found a space, check if it's orphan-banned
+            if spos > 0:
+                chunk = remainder[:spos].strip()
+                word_before = chunk.split()[-1].lower() if chunk else ""
+                # If it's a preposition/conjunction, try moving one space back
+                if word_before in no_break_after:
+                    backup_spos = remainder.rfind(' ', 0, spos)
+                    if backup_spos > 0:
+                        spos = backup_spos
+
+            # If no space found before limit, or space is too early, force cut at limit
+            if spos <= 0:
                 spos = MAX_CHARS_PER_LINE
+                
             chunk = remainder[:spos].strip()
             if chunk:
                 final_lines.append(chunk)
@@ -206,17 +239,17 @@ def split_into_balanced_lines(text: str, target_language: str = "is") -> List[st
         if remainder:
             final_lines.append(remainder)
             
-    # Abbreviate or fold if we exceed MAX_LINES
+    # If we still exceed MAX_LINES after formatting, try abbreviating.
+    # But never rejoin lines if it would cause them to exceed MAX_CHARS_PER_LINE!
     if len(final_lines) > MAX_LINES:
         joined = " ".join(final_lines).strip()
         condensed = abbreviate_bible_refs(joined, target_language)
         if len(condensed) < len(joined):
-            # Abbreviation helped, re-run split (just call self)
+            # Abbreviation helped, re-run split 
             return split_into_balanced_lines(condensed, target_language)
-                    
-        # Fold overflow
-        overflow = " ".join(final_lines[MAX_LINES - 1:]).strip()
-        final_lines = final_lines[:MAX_LINES - 1] + [overflow]
+            
+        # Do NOT force them into MAX_LINES if it violates MAX_CHARS_PER_LINE.
+        # It's better to have a 3-liner than a 45-character line that breaks the web player.
         
     return final_lines
 
@@ -224,3 +257,31 @@ def format_audio_event_text(event: SubtitleEvent) -> str:
     """Format audio event for subtitle display (e.g., '[LAUGHTER]')."""
     event_type = (event.audio_event_type or "sound").upper()
     return f"[{event_type}]"
+
+def add_speaker_dashes(events: List[SubtitleEvent]) -> List[SubtitleEvent]:
+    """
+    If the dominant JSON speaker changes from the previous event, 
+    prefix the new event's text with a speaker dash (- ).
+    """
+    from collections import Counter
+    for ev in events:
+        if ev.words:
+            speakers = [w.get("speaker") for w in ev.words if w.get("speaker")]
+            ev._dominant_speaker = Counter(speakers).most_common(1)[0][0] if speakers else None
+        else:
+            ev._dominant_speaker = None
+            
+    prev_speaker = None
+    for ev in events:
+         if not ev._dominant_speaker:
+             continue
+         if prev_speaker is None:
+             prev_speaker = ev._dominant_speaker
+             continue
+         if ev._dominant_speaker != prev_speaker:
+             if ev.text and not ev.text.startswith("-"):
+                 ev.text = "- " + ev.text.lstrip()
+                 if hasattr(ev, 'lines') and ev.lines:
+                     ev.lines[0] = "- " + ev.lines[0].lstrip()
+             prev_speaker = ev._dominant_speaker
+    return events

@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { useToastStore } from "@/store/toast";
+import { apiFetch } from "@/lib/api";
 import {
   Save,
   Loader2,
@@ -20,7 +21,18 @@ import {
   Maximize2,
   Minimize2,
   HelpCircle,
-  Search
+  Search,
+  Download,
+  Replace,
+  CaseSensitive,
+  Timer,
+  Check,
+  X,
+  Share2,
+  Eye,
+  PanelLeftClose,
+  PanelLeft,
+  Repeat
 } from "lucide-react";
 import Link from "next/link";
 import { AssistantPanel } from "@/components/AssistantPanel";
@@ -43,6 +55,9 @@ interface SubtitleEditorProps {
   initialSegments: Segment[];
   initialGraphicZones?: GraphicZone[];
   track?: TrackInfo | null;
+  bunnyDirectUrl?: string | null;
+  readOnly?: boolean;
+  mode?: "edit" | "review";
 }
 
 interface TrackInfo {
@@ -154,7 +169,7 @@ const AccordionItem = ({
   </div>
 );
 
-export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [], track }: SubtitleEditorProps) {
+export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [], track, bunnyDirectUrl, readOnly = false, mode = "edit" }: SubtitleEditorProps) {
   const addToast = useToastStore(s => s.addToast);
   const [segments, setSegments] = useState<Segment[]>(initialSegments);
   const trackInfo = track ?? null;
@@ -187,9 +202,50 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [showShortcutHelp, setShowShortcutHelp] = useState(false);
 
+  // Find & Replace state
+  const [showReplace, setShowReplace] = useState(false);
+  const [replaceText, setReplaceText] = useState("");
+  const [caseSensitive, setCaseSensitive] = useState(false);
+
+  // Timing adjust state
+  const [showTimingModal, setShowTimingModal] = useState(false);
+  const [timingOffset, setTimingOffset] = useState("0");
+
+  // Review mode state
+  const [reviewSubmitting, setReviewSubmitting] = useState(false);
+  const [reviewComplete, setReviewComplete] = useState(false);
+  const [showShareModal, setShowShareModal] = useState(false);
+  const [shareLink, setShareLink] = useState("");
+
   // Sidebar State
   const [activeAccordion, setActiveAccordion] = useState<string>("quality");
   const [copilotExpanded, setCopilotExpanded] = useState(true);
+
+  // Enhanced editor state
+  const SPEED_OPTIONS = [1, 1.25, 1.5, 2] as const;
+  const [playbackRate, setPlaybackRate] = useState(1);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try { return localStorage.getItem("omega-sidebar-collapsed") === "true"; } catch { return false; }
+  });
+  const VIDEO_SIZES = [60, 50, 35] as const;
+  const [videoSizeIndex, setVideoSizeIndex] = useState(1); // default 50%
+  const [focusedTextareaIndex, setFocusedTextareaIndex] = useState<number | null>(null);
+  const [showGotoModal, setShowGotoModal] = useState(false);
+  const [gotoSegmentNum, setGotoSegmentNum] = useState("");
+  const [isLoopingSegment, setIsLoopingSegment] = useState(false);
+  const minimapRef = useRef<HTMLDivElement>(null);
+  const [minimapHover, setMinimapHover] = useState<{ x: number; time: number } | null>(null);
+
+  // AI Editing state
+  interface BatchFix { id: number; original: string; suggested: string; reason: string; old_cps: number; new_cps: number; old_longest_line: number; new_longest_line: number; accepted: boolean; }
+  interface Alternative { label: string; text: string; cps: number; longest_line: number; }
+  const [batchFixLoading, setBatchFixLoading] = useState(false);
+  const [showBatchFixModal, setShowBatchFixModal] = useState(false);
+  const [batchFixes, setBatchFixes] = useState<BatchFix[]>([]);
+  const [alternativesLoading, setAlternativesLoading] = useState(false);
+  const [showAlternatives, setShowAlternatives] = useState(false);
+  const [alternatives, setAlternatives] = useState<Alternative[]>([]);
+  const [alternativesForIndex, setAlternativesForIndex] = useState<number | null>(null);
 
   // React to flagged segments from track metadata
   useEffect(() => {
@@ -307,6 +363,60 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
         searchInputRef.current?.focus();
         return;
       }
+      // Cmd/Ctrl+H: toggle Find & Replace
+      if (e.key.toLowerCase() === "h" && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        setShowReplace(prev => !prev);
+        searchInputRef.current?.focus();
+        return;
+      }
+
+      // Ctrl+B: toggle sidebar (works even in input fields)
+      if (e.key.toLowerCase() === "b" && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        setSidebarCollapsed(prev => !prev);
+        return;
+      }
+      // Ctrl+G: go to segment (works even in input fields)
+      if (e.key.toLowerCase() === "g" && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        setShowGotoModal(prev => !prev);
+        return;
+      }
+      // Ctrl+Shift+V: cycle video size
+      if (e.key.toLowerCase() === "v" && (e.metaKey || e.ctrlKey) && e.shiftKey) {
+        e.preventDefault();
+        setVideoSizeIndex(prev => (prev + 1) % VIDEO_SIZES.length);
+        return;
+      }
+
+      // Shift+Enter: get AI alternatives (works in textareas)
+      if (e.key === "Enter" && e.shiftKey && !e.metaKey && !e.ctrlKey) {
+        const target = e.target as HTMLElement;
+        if (target.tagName === "TEXTAREA" && focusedTextareaIndex !== null) {
+          e.preventDefault();
+          handleGetAlternatives(focusedTextareaIndex);
+          return;
+        }
+      }
+
+      // Escape: dismiss alternatives popover
+      if (e.key === "Escape" && showAlternatives) {
+        e.preventDefault();
+        setShowAlternatives(false);
+        setAlternativesForIndex(null);
+        return;
+      }
+
+      // Number keys 1/2/3: select alternative (when popover is open)
+      if (showAlternatives && alternatives.length > 0 && ["1", "2", "3"].includes(e.key)) {
+        const altIdx = parseInt(e.key) - 1;
+        if (altIdx < alternatives.length) {
+          e.preventDefault();
+          applyAlternative(alternatives[altIdx].text);
+          return;
+        }
+      }
 
       // Don't trigger other shortcuts when typing in input fields
       const target = e.target as HTMLElement;
@@ -320,13 +430,52 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
           seekPrev();
           break;
         case "k":
-        case " ": // Space bar
           e.preventDefault();
           togglePlay();
+          break;
+        case " ": // Space bar
+          if (e.shiftKey) {
+            e.preventDefault();
+            playCurrentSegment();
+          } else {
+            e.preventDefault();
+            togglePlay();
+          }
           break;
         case "l":
           e.preventDefault();
           seekNext();
+          break;
+        case "[":
+          e.preventDefault();
+          cycleSpeed(-1);
+          break;
+        case "]":
+          e.preventDefault();
+          cycleSpeed(1);
+          break;
+        case "arrowleft":
+          e.preventDefault();
+          handleSeek(Math.max(0, currentTime - 1/24)); // Frame step back
+          break;
+        case "arrowright":
+          e.preventDefault();
+          handleSeek(Math.min(duration, currentTime + 1/24)); // Frame step forward
+          break;
+        case "home":
+          e.preventDefault();
+          if (segments.length > 0) {
+            handleSeek(segments[0].start);
+            setSelectedIndices(new Set([0]));
+          }
+          break;
+        case "end":
+          e.preventDefault();
+          if (segments.length > 0) {
+            const lastIdx = segments.length - 1;
+            handleSeek(segments[lastIdx].start);
+            setSelectedIndices(new Set([lastIdx]));
+          }
           break;
         case "s":
           if (e.metaKey || e.ctrlKey) {
@@ -372,7 +521,7 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [segments, selectedIndices]); // Re-bind when segment state changes
+  }, [segments, selectedIndices, focusedTextareaIndex, showAlternatives, alternatives]); // Re-bind when segment/AI state changes
 
   const togglePlay = useCallback(() => {
     if (videoRef.current) {
@@ -452,10 +601,116 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
     setIsDirty(true);
   };
 
+  // Timing adjust handler
+  const handleTimingAdjust = useCallback(() => {
+    if (readOnly) return;
+    const offset = parseFloat(timingOffset);
+    if (isNaN(offset) || offset === 0) return;
+    pushHistory();
+    const newSegments = segments.map((seg, i) => {
+      if (!selectedIndices.has(i)) return seg;
+      return {
+        ...seg,
+        start: Math.max(0, seg.start + offset),
+        end: Math.max(0, seg.end + offset),
+      };
+    });
+    setSegments(newSegments);
+    setIsDirty(true);
+    setShowTimingModal(false);
+    setTimingOffset("0");
+    addToast(`Adjusted timing by ${offset > 0 ? "+" : ""}${offset}s for ${selectedIndices.size} segment${selectedIndices.size !== 1 ? "s" : ""}`, "success");
+  }, [readOnly, timingOffset, segments, selectedIndices, addToast]);
+
+  // Find & Replace handlers
+  const handleReplaceNext = useCallback(() => {
+    if (readOnly || !searchQuery || !replaceText) return;
+    const compare = caseSensitive ? (s: string) => s : (s: string) => s.toLowerCase();
+    const query = compare(searchQuery);
+    const newSegments = [...segments];
+    for (let i = 0; i < newSegments.length; i++) {
+      const idx = compare(newSegments[i].text).indexOf(query);
+      if (idx !== -1) {
+        pushHistory();
+        const original = newSegments[i].text;
+        newSegments[i] = {
+          ...newSegments[i],
+          text: original.substring(0, idx) + replaceText + original.substring(idx + searchQuery.length),
+        };
+        setSegments(newSegments);
+        setIsDirty(true);
+        return;
+      }
+    }
+  }, [readOnly, searchQuery, replaceText, caseSensitive, segments]);
+
+  const handleReplaceAll = useCallback(() => {
+    if (readOnly || !searchQuery || !replaceText) return;
+    pushHistory();
+    const flags = caseSensitive ? "g" : "gi";
+    const regex = new RegExp(searchQuery.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), flags);
+    let replaced = 0;
+    const newSegments = segments.map(seg => {
+      const newText = seg.text.replace(regex, replaceText);
+      if (newText !== seg.text) {
+        replaced++;
+        return { ...seg, text: newText };
+      }
+      return seg;
+    });
+    if (replaced > 0) {
+      setSegments(newSegments);
+      setIsDirty(true);
+      addToast(`Replaced in ${replaced} segment${replaced !== 1 ? "s" : ""}`, "success");
+    } else {
+      addToast("No matches found", "info");
+    }
+  }, [readOnly, searchQuery, replaceText, caseSensitive, segments, addToast]);
+
+  // Share for review handler
+  const handleGenerateShareLink = useCallback(async () => {
+    try {
+      const res = await apiFetch("/api/auth/review-link", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ job_id: jobId }),
+      });
+      if (!res.ok) throw new Error("Failed to generate link");
+      const data = await res.json();
+      setShareLink(data.review_url);
+      setShowShareModal(true);
+    } catch {
+      addToast("Failed to generate review link", "error");
+    }
+  }, [jobId, addToast]);
+
+  // Review approve/reject handlers
+  const handleReviewAction = useCallback(async (action: "approve" | "reject") => {
+    setReviewSubmitting(true);
+    try {
+      const res = await apiFetch(`/api/editor/${jobId}/${action}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ comments: "" }),
+      });
+      if (!res.ok) {
+        const err = await res.text();
+        throw new Error(err);
+      }
+      setReviewComplete(true);
+      addToast(action === "approve" ? "Approved successfully" : "Changes requested", "success");
+    } catch {
+      addToast(`${action} failed`, "error");
+    } finally {
+      setReviewSubmitting(false);
+    }
+  }, [jobId, addToast]);
+
   const handleSave = useCallback(async () => {
+    if (readOnly) return;
     setSaving(true);
     try {
-      await fetch(`/api/editor/${jobId}`, {
+      await apiFetch(`/api/editor/${jobId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -504,6 +759,144 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
   }, [isDirty]);
 
+  // Apply playback rate to video
+  useEffect(() => {
+    if (videoRef.current) videoRef.current.playbackRate = playbackRate;
+  }, [playbackRate]);
+
+  // Persist sidebar state
+  useEffect(() => {
+    try { localStorage.setItem("omega-sidebar-collapsed", String(sidebarCollapsed)); } catch {}
+  }, [sidebarCollapsed]);
+
+  // Segment loop: pause at OUT timecode when looping
+  useEffect(() => {
+    if (!isLoopingSegment || !videoRef.current) return;
+    const video = videoRef.current;
+    const checkLoop = () => {
+      if (activeIndex >= 0 && video.currentTime >= segments[activeIndex].end) {
+        video.pause();
+        setIsLoopingSegment(false);
+      }
+    };
+    video.addEventListener("timeupdate", checkLoop);
+    return () => video.removeEventListener("timeupdate", checkLoop);
+  }, [isLoopingSegment, activeIndex, segments]);
+
+  // Cycle playback speed
+  const cycleSpeed = useCallback((direction: 1 | -1) => {
+    setPlaybackRate(prev => {
+      const idx = SPEED_OPTIONS.indexOf(prev as typeof SPEED_OPTIONS[number]);
+      const next = idx + direction;
+      if (next < 0) return SPEED_OPTIONS[SPEED_OPTIONS.length - 1];
+      if (next >= SPEED_OPTIONS.length) return SPEED_OPTIONS[0];
+      return SPEED_OPTIONS[next];
+    });
+  }, []);
+
+  // Play current segment only (Shift+Space)
+  const playCurrentSegment = useCallback(() => {
+    if (!videoRef.current || activeIndex < 0) return;
+    const seg = segments[activeIndex];
+    videoRef.current.currentTime = seg.start;
+    videoRef.current.play();
+    setIsLoopingSegment(true);
+  }, [activeIndex, segments]);
+
+  // Go to segment by number
+  const handleGotoSegment = useCallback(() => {
+    const num = parseInt(gotoSegmentNum, 10);
+    if (isNaN(num) || num < 1 || num > segments.length) return;
+    const targetIndex = num - 1;
+    setSelectedIndices(new Set([targetIndex]));
+    if (videoRef.current) videoRef.current.currentTime = segments[targetIndex].start;
+    setShowGotoModal(false);
+    setGotoSegmentNum("");
+  }, [gotoSegmentNum, segments]);
+
+  // AI: Batch QC Fix
+  const handleBatchFix = useCallback(async () => {
+    setBatchFixLoading(true);
+    try {
+      const res = await apiFetch(`/api/editor/${jobId}/ai/batch-fix`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ segments }),
+      });
+      if (!res.ok) throw new Error("API error");
+      const data = await res.json();
+      const fixes = (data.fixes || []).map((f: Omit<BatchFix, 'accepted'>) => ({ ...f, accepted: true }));
+      if (fixes.length === 0) {
+        addToast("No QC issues to fix", "info");
+      } else {
+        setBatchFixes(fixes);
+        setShowBatchFixModal(true);
+      }
+    } catch {
+      addToast("AI batch fix failed", "error");
+    } finally {
+      setBatchFixLoading(false);
+    }
+  }, [jobId, segments, addToast]);
+
+  const applyBatchFixes = useCallback(() => {
+    const accepted = batchFixes.filter(f => f.accepted);
+    if (accepted.length === 0) {
+      setShowBatchFixModal(false);
+      return;
+    }
+    pushHistory();
+    const fixMap = new Map(accepted.map(f => [f.id, f.suggested]));
+    const newSegments = segments.map(seg => {
+      if (seg.id !== undefined && fixMap.has(seg.id)) {
+        return { ...seg, text: fixMap.get(seg.id)! };
+      }
+      return seg;
+    });
+    setSegments(newSegments);
+    setIsDirty(true);
+    setShowBatchFixModal(false);
+    addToast(`Applied ${accepted.length} AI fixes`, "success");
+  }, [batchFixes, segments, addToast]);
+
+  // AI: Get Alternatives
+  const handleGetAlternatives = useCallback(async (index: number) => {
+    const seg = segments[index];
+    if (!seg) return;
+    setAlternativesLoading(true);
+    setAlternativesForIndex(index);
+    setShowAlternatives(true);
+    setAlternatives([]);
+    try {
+      const contextBefore = segments.slice(Math.max(0, index - 3), index);
+      const contextAfter = segments.slice(index + 1, index + 4);
+      const res = await apiFetch(`/api/editor/${jobId}/ai/alternatives`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ segment: seg, context_before: contextBefore, context_after: contextAfter }),
+      });
+      if (!res.ok) throw new Error("API error");
+      const data = await res.json();
+      setAlternatives(data.alternatives || []);
+    } catch {
+      addToast("Failed to get alternatives", "error");
+      setShowAlternatives(false);
+    } finally {
+      setAlternativesLoading(false);
+    }
+  }, [jobId, segments, addToast]);
+
+  const applyAlternative = useCallback((altText: string) => {
+    if (alternativesForIndex === null) return;
+    pushHistory();
+    const newSegments = [...segments];
+    newSegments[alternativesForIndex] = { ...newSegments[alternativesForIndex], text: altText };
+    setSegments(newSegments);
+    setIsDirty(true);
+    setShowAlternatives(false);
+    setAlternativesForIndex(null);
+  }, [alternativesForIndex, segments]);
+
   const seekPrev = useCallback(() => {
     if (!segments.length) return;
     const targetIndex = Math.max(0, activeIndex > 0 ? activeIndex - 1 : 0);
@@ -529,7 +922,14 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
             <ArrowLeft className="w-4 h-4" />
           </Link>
           <div>
-            <div className="label">Workstation</div>
+            <div className="label flex items-center gap-2">
+              {mode === "review" ? "Review" : "Workstation"}
+              {mode === "review" && (
+                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] bg-purple-600/20 text-purple-300">
+                  <Eye className="w-2.5 h-2.5" /> Read-only
+                </span>
+              )}
+            </div>
             <div className="text-sm font-medium text-primary truncate max-w-[200px]">{jobId}</div>
           </div>
         </div>
@@ -552,10 +952,77 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
           >
             <HelpCircle className="w-4 h-4" />
           </button>
-          <button onClick={handleSave} disabled={saving} className="btn btn-primary">
-            {saving ? <Loader2 className="w-4 h-4 spin" /> : <Save className="w-4 h-4" />}
-            Save
+          {/* Share for Review (edit mode only) */}
+          {mode === "edit" && (
+            <button
+              onClick={handleGenerateShareLink}
+              className="btn btn-ghost text-xs text-muted hover:text-white flex items-center gap-1"
+              title="Generate review link"
+            >
+              <Share2 className="w-3.5 h-3.5" />
+              Share
+            </button>
+          )}
+          {/* Export Dropdown */}
+          <div className="relative group">
+            <button className="btn btn-ghost text-xs text-muted hover:text-white flex items-center gap-1">
+              <Download className="w-3.5 h-3.5" />
+              Export
+              <ChevronDown className="w-3 h-3" />
+            </button>
+            <div className="absolute right-0 top-full mt-1 hidden group-hover:block bg-[rgb(30,30,30)] border border-subtle rounded-lg shadow-xl py-1 z-50 min-w-[120px]">
+              {["SRT", "VTT", "TTML"].map(fmt => (
+                <a
+                  key={fmt}
+                  href={`/api/editor/${jobId}/export/${fmt.toLowerCase()}`}
+                  download
+                  className="block px-4 py-1.5 text-xs text-gray-300 hover:bg-white/5 hover:text-white transition-colors"
+                >
+                  {fmt}
+                </a>
+              ))}
+            </div>
+          </div>
+          {/* Timing Adjust */}
+          <button
+            onClick={() => setShowTimingModal(true)}
+            disabled={selectedIndices.size === 0 || readOnly}
+            className="btn btn-ghost text-xs text-muted hover:text-white disabled:opacity-40 flex items-center gap-1"
+            title="Adjust timing of selected segments"
+          >
+            <Timer className="w-3.5 h-3.5" />
+            Timing
           </button>
+          {mode === "review" ? (
+            reviewComplete ? (
+              <span className="text-xs text-emerald-400 flex items-center gap-1">
+                <Check className="w-4 h-4" /> Review submitted
+              </span>
+            ) : (
+              <>
+                <button
+                  onClick={() => handleReviewAction("reject")}
+                  disabled={reviewSubmitting}
+                  className="btn btn-ghost text-xs text-rose-400 hover:text-rose-300 flex items-center gap-1"
+                >
+                  <X className="w-4 h-4" /> Request Changes
+                </button>
+                <button
+                  onClick={() => handleReviewAction("approve")}
+                  disabled={reviewSubmitting}
+                  className="btn text-xs bg-emerald-600/30 text-emerald-300 hover:bg-emerald-600/50 flex items-center gap-1 px-4 py-1.5 rounded-lg"
+                >
+                  {reviewSubmitting ? <Loader2 className="w-4 h-4 spin" /> : <Check className="w-4 h-4" />}
+                  Approve
+                </button>
+              </>
+            )
+          ) : (
+            <button onClick={handleSave} disabled={saving || readOnly} className="btn btn-primary">
+              {saving ? <Loader2 className="w-4 h-4 spin" /> : <Save className="w-4 h-4" />}
+              Save
+            </button>
+          )}
         </div>
       </header>
 
@@ -563,8 +1030,8 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
       <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* Left: Video + Transport + Segment List - with left padding for edge spacing */}
         <div className="flex-1 flex flex-col min-w-0 pl-6 overflow-hidden">
-          {/* Video Container - Fixed height, never scrolls away */}
-          <div className="h-[50%] min-h-[300px] flex flex-col bg-black border-b border-subtle shrink-0">
+          {/* Video Container - Dynamic height with toggle */}
+          <div className={`min-h-[200px] flex flex-col bg-black shrink-0 transition-[height] duration-300 ease-in-out`} style={{ height: `${VIDEO_SIZES[videoSizeIndex]}%` }}>
             <div className="flex-1 relative flex items-center justify-center min-h-0 overflow-hidden">
               <video
                 ref={videoRef}
@@ -572,8 +1039,15 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
                 className="max-w-full max-h-full object-contain rounded-sm"
                 onClick={togglePlay}
                 onError={(e) => {
-                  e.currentTarget.style.display = 'none';
-                  const p = e.currentTarget.parentElement;
+                  const vid = e.currentTarget;
+                  // Try Bunny CDN fallback before showing error
+                  if (bunnyDirectUrl && !vid.dataset.triedCdn) {
+                    vid.dataset.triedCdn = "1";
+                    vid.src = bunnyDirectUrl;
+                    return;
+                  }
+                  vid.style.display = 'none';
+                  const p = vid.parentElement;
                   if (p && !p.querySelector('.video-fallback')) {
                     const fb = document.createElement('div');
                     fb.className = 'video-fallback absolute inset-0 flex flex-col items-center justify-center text-gray-500 bg-black/50 text-xs px-4 text-center';
@@ -594,34 +1068,103 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
               )}
             </div>
 
-            {/* Transport Controls */}
-            <div className="px-4 py-3 border-t border-subtle surface-1 shrink-0">
-              <div className="flex items-center justify-between gap-4 mb-2">
+            {/* Transport Controls — Enhanced */}
+            <div className="px-4 py-2 border-t border-subtle surface-1 shrink-0">
+              <div className="flex items-center justify-between gap-4 mb-1.5">
                 <span className="font-mono text-cyan text-sm tracking-wide w-28">{formatTimecode(currentTime)}</span>
                 <div className="flex items-center gap-1">
-                  <button onClick={seekPrev} className="btn btn-ghost p-2">
+                  <button onClick={seekPrev} className="btn btn-ghost p-2" title="Previous segment (J)">
                     <SkipBack className="w-4 h-4" />
                   </button>
-                  <button onClick={togglePlay} className="btn btn-primary p-3 rounded-full">
+                  <button onClick={togglePlay} className="btn btn-primary p-3 rounded-full" title="Play/Pause (K)">
                     {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
                   </button>
-                  <button onClick={seekNext} className="btn btn-ghost p-2">
+                  <button onClick={seekNext} className="btn btn-ghost p-2" title="Next segment (L)">
                     <SkipForward className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={playCurrentSegment}
+                    className={`btn btn-ghost p-2 ${isLoopingSegment ? "text-cyan-400" : ""}`}
+                    title="Play current segment (Shift+Space)"
+                  >
+                    <Repeat className="w-4 h-4" />
+                  </button>
+                  <div className="w-px h-4 bg-[rgba(255,255,255,0.08)] mx-1" />
+                  <button
+                    onClick={() => cycleSpeed(1)}
+                    className={`speed-btn ${playbackRate !== 1 ? "active" : ""}`}
+                    title="Playback speed ([ / ])"
+                  >
+                    {playbackRate}x
                   </button>
                 </div>
                 <span className="font-mono text-muted text-xs w-28 text-right">{formatTimecode(duration)}</span>
               </div>
-              <input
-                type="range"
-                min={0}
-                max={duration || 0}
-                step="0.01"
-                value={currentTime}
-                onChange={(e) => handleSeek(parseFloat(e.target.value))}
-                className="w-full accent-cyan-500"
-              />
+              {/* Segment Mini-Map Seek Bar */}
+              <div
+                ref={minimapRef}
+                className="segment-minimap"
+                onClick={(e) => {
+                  if (!minimapRef.current || !duration) return;
+                  const rect = minimapRef.current.getBoundingClientRect();
+                  const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+                  handleSeek(pct * duration);
+                }}
+                onMouseMove={(e) => {
+                  if (!minimapRef.current || !duration) return;
+                  const rect = minimapRef.current.getBoundingClientRect();
+                  const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+                  setMinimapHover({ x: e.clientX - rect.left, time: pct * duration });
+                }}
+                onMouseLeave={() => setMinimapHover(null)}
+              >
+                {/* Segment markers */}
+                {duration > 0 && segments.map((seg, i) => {
+                  const left = (seg.start / duration) * 100;
+                  const width = Math.max(0.15, ((seg.end - seg.start) / duration) * 100);
+                  return (
+                    <div
+                      key={i}
+                      className={`segment-minimap-marker ${i === activeIndex ? "segment-minimap-active" : ""}`}
+                      style={{ left: `${left}%`, width: `${width}%` }}
+                    />
+                  );
+                })}
+                {/* Playhead */}
+                {duration > 0 && (
+                  <div
+                    className="segment-minimap-progress"
+                    style={{ left: `${(currentTime / duration) * 100}%` }}
+                  />
+                )}
+                {/* Hover tooltip */}
+                {minimapHover && (
+                  <div className="segment-minimap-hover" style={{ left: minimapHover.x }}>
+                    {formatTimecode(minimapHover.time)}
+                  </div>
+                )}
+              </div>
+              {/* Segment Info Line */}
+              {activeIndex >= 0 && (
+                <div className="segment-info-line">
+                  <span><span className="info-label">Seg</span> {activeIndex + 1}/{segments.length}</span>
+                  <span><span className="info-label">CPS</span> {(() => {
+                    const seg = segments[activeIndex];
+                    const dur = seg.end - seg.start;
+                    const chars = (seg.text || "").replace(/\s+/g, " ").trim().length;
+                    return dur > 0 ? (chars / dur).toFixed(1) : "—";
+                  })()}</span>
+                  <span><span className="info-label">Dur</span> {(segments[activeIndex].end - segments[activeIndex].start).toFixed(2)}s</span>
+                </div>
+              )}
             </div>
           </div>
+          {/* Video/Segments Split Toggle */}
+          <div
+            className="video-size-toggle"
+            onClick={() => setVideoSizeIndex(prev => (prev + 1) % VIDEO_SIZES.length)}
+            title={`Video: ${VIDEO_SIZES[videoSizeIndex]}% (Ctrl+Shift+V to cycle)`}
+          />
 
           {/* Segment Editor - This section scrolls independently */}
           <div className="flex-1 flex flex-col surface-1 min-h-0 overflow-hidden">
@@ -645,29 +1188,71 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
               <span className="text-xs text-muted">{segments.length} segments</span>
             </div>
 
-            {/* Search Bar */}
-            <div className="h-9 flex items-center gap-2 px-5 border-b border-subtle shrink-0">
-              <Search className="w-3.5 h-3.5 text-muted" />
-              <input
-                ref={searchInputRef}
-                type="text"
-                placeholder="Search segments..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="flex-1 bg-transparent text-sm text-gray-200 outline-none placeholder:text-gray-600"
-              />
-              {searchQuery && (
+            {/* Search + Replace Bar */}
+            <div className="border-b border-subtle shrink-0">
+              <div className="h-9 flex items-center gap-2 px-5">
+                <Search className="w-3.5 h-3.5 text-muted shrink-0" />
+                <input
+                  ref={searchInputRef}
+                  type="text"
+                  placeholder="Search segments..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="flex-1 bg-transparent text-sm text-gray-200 outline-none placeholder:text-gray-600"
+                />
                 <button
-                  onClick={() => setSearchQuery("")}
-                  className="text-xs text-gray-500 hover:text-gray-300 transition-colors"
+                  onClick={() => setCaseSensitive(prev => !prev)}
+                  className={`p-1 rounded transition-colors ${caseSensitive ? "text-cyan-400 bg-cyan-500/10" : "text-gray-600 hover:text-gray-400"}`}
+                  title="Case sensitive"
                 >
-                  Clear
+                  <CaseSensitive className="w-3.5 h-3.5" />
                 </button>
-              )}
-              {searchQuery && (
-                <span className="text-xs text-muted">
-                  {visibleSegments.length} result{visibleSegments.length !== 1 ? "s" : ""}
-                </span>
+                <button
+                  onClick={() => setShowReplace(prev => !prev)}
+                  className={`p-1 rounded transition-colors ${showReplace ? "text-cyan-400 bg-cyan-500/10" : "text-gray-600 hover:text-gray-400"}`}
+                  title="Find & Replace (Cmd+H)"
+                >
+                  <Replace className="w-3.5 h-3.5" />
+                </button>
+                {searchQuery && (
+                  <button
+                    onClick={() => setSearchQuery("")}
+                    className="text-xs text-gray-500 hover:text-gray-300 transition-colors"
+                  >
+                    Clear
+                  </button>
+                )}
+                {searchQuery && (
+                  <span className="text-xs text-muted">
+                    {visibleSegments.length} result{visibleSegments.length !== 1 ? "s" : ""}
+                  </span>
+                )}
+              </div>
+              {showReplace && (
+                <div className="h-9 flex items-center gap-2 px-5 border-t border-subtle">
+                  <Replace className="w-3.5 h-3.5 text-muted shrink-0" />
+                  <input
+                    type="text"
+                    placeholder="Replace with..."
+                    value={replaceText}
+                    onChange={(e) => setReplaceText(e.target.value)}
+                    className="flex-1 bg-transparent text-sm text-gray-200 outline-none placeholder:text-gray-600"
+                  />
+                  <button
+                    onClick={handleReplaceNext}
+                    disabled={!searchQuery || !replaceText || readOnly}
+                    className="text-xs px-2 py-0.5 rounded bg-cyan-600/20 text-cyan-300 hover:bg-cyan-600/40 disabled:opacity-40 transition-colors"
+                  >
+                    Replace
+                  </button>
+                  <button
+                    onClick={handleReplaceAll}
+                    disabled={!searchQuery || !replaceText || readOnly}
+                    className="text-xs px-2 py-0.5 rounded bg-cyan-600/20 text-cyan-300 hover:bg-cyan-600/40 disabled:opacity-40 transition-colors"
+                  >
+                    Replace All
+                  </button>
+                </div>
               )}
             </div>
 
@@ -683,20 +1268,35 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
                   <span className="qc-summary-clean">All clear</span>
                 )}
               </div>
-              <button
-                type="button"
-                className={`qc-toggle${showOnlyIssues ? " active" : ""}`}
-                onClick={() => setShowOnlyIssues((prev) => !prev)}
-                disabled={warningSummary.segmentsWithIssues === 0}
-              >
-                Show only issues
-              </button>
+              <div className="flex items-center gap-2">
+                {!readOnly && warningSummary.segmentsWithIssues > 0 && (
+                  <button
+                    type="button"
+                    className="qc-fix-btn"
+                    onClick={handleBatchFix}
+                    disabled={batchFixLoading}
+                    title="AI fix all QC violations"
+                  >
+                    {batchFixLoading ? <span className="spinner" /> : <span>&#10024;</span>}
+                    {batchFixLoading ? "Fixing..." : "Fix All"}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className={`qc-toggle${showOnlyIssues ? " active" : ""}`}
+                  onClick={() => setShowOnlyIssues((prev) => !prev)}
+                  disabled={warningSummary.segmentsWithIssues === 0}
+                >
+                  Show only issues
+                </button>
+              </div>
             </div>
 
             {/* Segment List - Scrollable */}
             <div className="flex-1 overflow-y-auto min-h-0">
-              {/* Header Row - Professional spacing */}
-              <div className="grid grid-cols-[120px_120px_1fr_1fr] border-b border-subtle sticky top-0 z-10 surface-2 text-[11px] text-muted font-medium uppercase tracking-wider shadow-sm">
+              {/* Header Row - Professional spacing with row number */}
+              <div className="grid grid-cols-[40px_120px_120px_1fr_1fr] border-b border-subtle sticky top-0 z-10 surface-2 text-[11px] text-muted font-medium uppercase tracking-wider shadow-sm">
+                <div className="px-1 py-4 border-r border-subtle text-center">#</div>
                 <div className="px-5 py-4 border-r border-subtle">Start Time</div>
                 <div className="px-5 py-4 border-r border-subtle">End Time</div>
                 <div className="px-5 py-4 border-r border-subtle">Original {trackLanguage === 'is' ? '(English)' : 'Text'}</div>
@@ -712,6 +1312,15 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
                 const isSelected = selectedIndices.has(index);
                 const isFlagged = seg.id !== undefined && flaggedSegmentIds.has(seg.id);
                 const warningLevel = warnings.some((w) => w.level === "error") ? "error" : "warn";
+                // Char counter calc
+                const segText = seg.text || "";
+                const segLines = segText.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+                const longestLine = segLines.length ? Math.max(...segLines.map(l => l.length)) : segText.length;
+                const segDur = seg.end - seg.start;
+                const segChars = segText.replace(/\s+/g, " ").trim().length;
+                const segCps = segDur > 0 ? segChars / segDur : 0;
+                const { ideal: cpsIdeal, tight: cpsTight } = getCpsTargets(trackLanguage);
+                const charStatus = segCps > cpsTight ? "error" : segCps > cpsIdeal ? "warn" : "ok";
                 return (
                   <div
                     key={index}
@@ -720,21 +1329,24 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
                       handleSelect(index, e.metaKey || e.ctrlKey || e.shiftKey);
                       if (!isSelected && videoRef.current) videoRef.current.currentTime = seg.start;
                     }}
-                    className={`grid grid-cols-[120px_120px_1fr_1fr] border-b text-sm cursor-pointer transition-all duration-75 ease-out ${warnings.length > 0 ? (warningLevel === "error" ? "segment-row--error" : "segment-row--warn") : ""} ${isFlagged ? "border-l-2 border-l-amber-500 bg-amber-500/5" : ""
+                    className={`grid grid-cols-[40px_120px_120px_1fr_1fr] border-b text-sm cursor-pointer transition-all duration-75 ease-out ${warnings.length > 0 ? (warningLevel === "error" ? "segment-row--error" : "segment-row--warn") : ""} ${isFlagged ? "border-l-2 border-l-amber-500 bg-amber-500/5" : ""
                       } ${isSelected
                         ? "bg-cyan-500/10 border-l-2 border-l-cyan-500"
                         : isActive
-                          ? "bg-white/5"
+                          ? "segment-active-glow"
                           : "hover:bg-white/[0.02]"
                       } border-subtle`}
                     title={isFlagged ? "\u26A0\uFE0F Flagged for review" : undefined}
                   >
+                    {/* Row Number */}
+                    <div className="segment-row-number px-1 py-4 border-r border-subtle flex items-center justify-center">
+                      {index + 1}
+                    </div>
                     {/* IN Timecode */}
                     <div
                       className="px-5 py-4 border-r border-subtle font-mono text-emerald-400 cursor-text flex items-center gap-2 tracking-wider text-[13px]"
                       onClick={(e) => {
                         e.stopPropagation();
-                        // Seek video when clicking IN timecode
                         if (videoRef.current) videoRef.current.currentTime = seg.start;
                         setSelectedIndices(new Set([index]));
                       }}
@@ -754,7 +1366,6 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
                       className="px-5 py-4 border-r border-subtle font-mono text-rose-400 cursor-text flex items-center tracking-wider text-[13px]"
                       onClick={(e) => {
                         e.stopPropagation();
-                        // Seek video when clicking OUT timecode (seek to start of segment)
                         if (videoRef.current) videoRef.current.currentTime = seg.start;
                         setSelectedIndices(new Set([index]));
                       }}
@@ -766,32 +1377,82 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
                       className="px-5 py-4 border-r border-subtle text-muted block leading-relaxed opacity-80 select-text"
                       onClick={(e) => {
                         e.stopPropagation();
-                        // Seek video when clicking source text
                         if (videoRef.current) videoRef.current.currentTime = seg.start;
                         setSelectedIndices(new Set([index]));
                       }}
                     >
                       {seg.source_text || "\u2014"}
                     </div>
-                    {/* Text Content */}
-                    <textarea
-                      value={seg.text}
-                      onChange={(e) => handleSegmentChange(index, "text", e.target.value)}
-                      onFocus={() => {
-                        pushHistory();
-                        // Seek video to segment start when focusing on text
-                        if (videoRef.current) videoRef.current.currentTime = seg.start;
-                        setSelectedIndices(new Set([index]));
-                      }}
-                      onClick={(e) => e.stopPropagation()}
-                      className="bg-transparent px-5 py-4 resize-none outline-none focus:bg-[rgb(20,20,24)] text-gray-200 min-h-[56px] w-full block leading-relaxed"
-                      spellCheck={false}
-                      rows={1}
-                      onInput={(e) => {
-                        e.currentTarget.style.height = "auto";
-                        e.currentTarget.style.height = e.currentTarget.scrollHeight + "px";
-                      }}
-                    />
+                    {/* Text Content with Character Counter */}
+                    <div className="relative">
+                      <textarea
+                        value={seg.text}
+                        onChange={(e) => handleSegmentChange(index, "text", e.target.value)}
+                        onFocus={() => {
+                          pushHistory();
+                          if (videoRef.current) videoRef.current.currentTime = seg.start;
+                          setSelectedIndices(new Set([index]));
+                          setFocusedTextareaIndex(index);
+                        }}
+                        onBlur={() => setFocusedTextareaIndex(null)}
+                        onClick={(e) => e.stopPropagation()}
+                        className="bg-transparent px-5 py-4 resize-none outline-none focus:bg-[rgb(20,20,24)] text-gray-200 min-h-[56px] w-full block leading-relaxed"
+                        spellCheck={false}
+                        rows={1}
+                        onInput={(e) => {
+                          e.currentTarget.style.height = "auto";
+                          e.currentTarget.style.height = e.currentTarget.scrollHeight + "px";
+                        }}
+                      />
+                      {/* Character Counter */}
+                      <div className={`char-counter char-counter--${charStatus} ${focusedTextareaIndex === index ? "visible" : ""}`}>
+                        {longestLine}/{MAX_CHARS_PER_LINE} · {segCps.toFixed(1)}
+                      </div>
+                      {/* AI Alternatives Popover */}
+                      {showAlternatives && alternativesForIndex === index && (
+                        <div className="alternatives-popover" onClick={e => e.stopPropagation()}>
+                          <div className="alternatives-header">
+                            <span>AI Alternatives</span>
+                            <button
+                              onClick={() => { setShowAlternatives(false); setAlternativesForIndex(null); }}
+                              className="text-gray-500 hover:text-gray-300 text-xs"
+                            >
+                              Esc
+                            </button>
+                          </div>
+                          {alternativesLoading ? (
+                            <div className="alternatives-loading">
+                              <span className="spinner" />
+                              Generating alternatives...
+                            </div>
+                          ) : alternatives.length === 0 ? (
+                            <div className="alternatives-loading">No alternatives available</div>
+                          ) : (
+                            alternatives.map((alt, altIdx) => {
+                              const altCpsClass = alt.cps > cpsTight ? "error" : alt.cps > cpsIdeal ? "warn" : "ok";
+                              return (
+                                <div
+                                  key={altIdx}
+                                  className="alternative-option"
+                                  onClick={() => applyAlternative(alt.text)}
+                                >
+                                  <span className="alternative-key">{altIdx + 1}</span>
+                                  <div className="alternative-content">
+                                    <div className="alternative-label">{alt.label}</div>
+                                    <div className="alternative-text">{alt.text}</div>
+                                  </div>
+                                  <div className="alternative-meta">
+                                    <span className={`alternative-cps alternative-cps--${altCpsClass}`}>
+                                      {alt.cps.toFixed(1)}
+                                    </span>
+                                  </div>
+                                </div>
+                              );
+                            })
+                          )}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 );
               })}
@@ -801,8 +1462,19 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
           </div>
         </div>
 
-        {/* Right Sidebar - With Accordion & Resizable Copilot */}
-        <div className="w-[320px] flex flex-col shrink-0 border-l border-subtle surface-1 overflow-hidden transition-all duration-300">
+        {/* Right Sidebar - Collapsible */}
+        <div
+          className="relative flex flex-col shrink-0 border-l border-subtle surface-1 overflow-hidden transition-all duration-300"
+          style={{ width: sidebarCollapsed ? 0 : 320, borderLeftWidth: sidebarCollapsed ? 0 : undefined }}
+        >
+          {/* Sidebar Toggle */}
+          <button
+            className="sidebar-toggle"
+            onClick={() => setSidebarCollapsed(prev => !prev)}
+            title={sidebarCollapsed ? "Show sidebar (Ctrl+B)" : "Hide sidebar (Ctrl+B)"}
+          >
+            {sidebarCollapsed ? <PanelLeft className="w-3 h-3" /> : <PanelLeftClose className="w-3 h-3" />}
+          </button>
           {/* Copilot Section - Toggleable Size */}
           <div className={`flex flex-col border-b border-subtle transition-[height] duration-300 ease-in-out ${copilotExpanded ? 'h-[60%] shrink-0' : 'h-[60px] shrink-0'}`}>
             <div className="flex items-center justify-between px-3 py-3 border-b border-subtle bg-surface-2">
@@ -933,6 +1605,160 @@ export function SubtitleEditor({ jobId, initialSegments, initialGraphicZones = [
         open={showShortcutHelp}
         onClose={() => setShowShortcutHelp(false)}
       />
+
+      {/* Share Review Link Modal */}
+      {showShareModal && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={() => setShowShareModal(false)}>
+          <div className="bg-[rgb(30,30,30)] border border-subtle rounded-xl p-6 w-96 shadow-2xl" onClick={e => e.stopPropagation()}>
+            <h3 className="text-sm font-medium text-gray-200 mb-2">Share for Review</h3>
+            <p className="text-xs text-gray-500 mb-4">Send this link to a reviewer. It expires in 72 hours.</p>
+            <div className="flex items-center gap-2 mb-4">
+              <input
+                readOnly
+                value={shareLink}
+                className="flex-1 px-2 py-1.5 rounded bg-[rgb(20,20,20)] border border-subtle text-xs text-gray-300 outline-none font-mono"
+                onClick={e => (e.target as HTMLInputElement).select()}
+              />
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText(shareLink);
+                  addToast("Link copied to clipboard", "success");
+                }}
+                className="text-xs px-3 py-1.5 rounded bg-cyan-600/30 text-cyan-300 hover:bg-cyan-600/50 transition-colors shrink-0"
+              >
+                Copy
+              </button>
+            </div>
+            <div className="flex justify-end">
+              <button onClick={() => setShowShareModal(false)} className="text-xs px-3 py-1.5 rounded text-gray-400 hover:text-gray-200 transition-colors">
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Go-to-Segment Modal */}
+      {showGotoModal && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={() => { setShowGotoModal(false); setGotoSegmentNum(""); }}>
+          <div className="goto-modal" onClick={e => e.stopPropagation()}>
+            <h3 className="text-sm font-medium text-gray-200 mb-3">Go to Segment</h3>
+            <input
+              type="number"
+              min={1}
+              max={segments.length}
+              placeholder={`1 – ${segments.length}`}
+              value={gotoSegmentNum}
+              onChange={e => setGotoSegmentNum(e.target.value)}
+              autoFocus
+              onKeyDown={e => {
+                if (e.key === "Enter") handleGotoSegment();
+                if (e.key === "Escape") { setShowGotoModal(false); setGotoSegmentNum(""); }
+              }}
+            />
+            <div className="flex justify-end gap-2 mt-3">
+              <button onClick={() => { setShowGotoModal(false); setGotoSegmentNum(""); }} className="text-xs px-3 py-1.5 rounded text-gray-400 hover:text-gray-200 transition-colors">
+                Cancel
+              </button>
+              <button onClick={handleGotoSegment} className="text-xs px-3 py-1.5 rounded bg-cyan-600/30 text-cyan-300 hover:bg-cyan-600/50 transition-colors">
+                Go
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Batch QC Fix Modal */}
+      {showBatchFixModal && (
+        <div className="batch-fix-overlay" onClick={() => setShowBatchFixModal(false)}>
+          <div className="batch-fix-modal" onClick={e => e.stopPropagation()}>
+            <div className="batch-fix-header">
+              <h3>AI QC Fixes ({batchFixes.length} suggestions)</h3>
+              <button
+                onClick={() => setShowBatchFixModal(false)}
+                className="text-gray-500 hover:text-gray-300 transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="batch-fix-body">
+              {batchFixes.map((fix, i) => (
+                <div key={fix.id} className="fix-card">
+                  <div className="fix-card-header">
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={fix.accepted}
+                        onChange={() => {
+                          setBatchFixes(prev => prev.map((f, j) =>
+                            j === i ? { ...f, accepted: !f.accepted } : f
+                          ));
+                        }}
+                        className="accent-purple-500"
+                      />
+                      <span className="fix-card-id">Segment #{fix.id}</span>
+                    </div>
+                    <span className="fix-reason-badge">{fix.reason}</span>
+                  </div>
+                  <div className="fix-diff">
+                    <div className="fix-diff-original">{fix.original}</div>
+                    <div className="fix-diff-suggested">{fix.suggested}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="batch-fix-footer">
+              <div className="text-xs text-gray-500">
+                {batchFixes.filter(f => f.accepted).length} of {batchFixes.length} selected
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setShowBatchFixModal(false)}
+                  className="text-xs px-3 py-1.5 rounded text-gray-400 hover:text-gray-200 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={applyBatchFixes}
+                  className="text-xs px-4 py-1.5 rounded bg-purple-600/30 text-purple-300 hover:bg-purple-600/50 transition-colors font-medium"
+                >
+                  Apply Selected
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Timing Adjust Modal */}
+      {showTimingModal && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={() => setShowTimingModal(false)}>
+          <div className="bg-[rgb(30,30,30)] border border-subtle rounded-xl p-6 w-80 shadow-2xl" onClick={e => e.stopPropagation()}>
+            <h3 className="text-sm font-medium text-gray-200 mb-4">Adjust Timing</h3>
+            <p className="text-xs text-gray-500 mb-3">{selectedIndices.size} segment{selectedIndices.size !== 1 ? "s" : ""} selected</p>
+            <div className="flex items-center gap-2 mb-4">
+              <label className="text-xs text-gray-400">Offset (seconds):</label>
+              <input
+                type="number"
+                step="0.1"
+                value={timingOffset}
+                onChange={e => setTimingOffset(e.target.value)}
+                className="w-24 px-2 py-1.5 rounded bg-[rgb(20,20,20)] border border-subtle text-sm text-gray-200 outline-none"
+                autoFocus
+                onKeyDown={e => { if (e.key === "Enter") handleTimingAdjust(); }}
+              />
+            </div>
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setShowTimingModal(false)} className="text-xs px-3 py-1.5 rounded text-gray-400 hover:text-gray-200 transition-colors">
+                Cancel
+              </button>
+              <button onClick={handleTimingAdjust} className="text-xs px-3 py-1.5 rounded bg-cyan-600/30 text-cyan-300 hover:bg-cyan-600/50 transition-colors">
+                Apply
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

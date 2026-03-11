@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import { Sparkles, Zap, ArrowUp, Loader2, Check, Copy, ClipboardCheck } from "lucide-react";
+import { apiFetch } from "@/lib/api";
 
 type StructuredSuggestion = {
   segment_id: number | string;
@@ -98,7 +99,7 @@ export function AssistantPanel({ jobId, onApplySuggestion }: AssistantPanelProps
     setLoading(true);
 
     try {
-      const res = await fetch("/api/assistant/chat", {
+      const res = await apiFetch("/api/assistant/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ job_id: jobId, message: newMsg.content, history: messages }),

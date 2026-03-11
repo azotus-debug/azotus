@@ -2,8 +2,7 @@
 
 import { useState, useRef, useCallback } from "react";
 import { Upload, X, Film, FileText, Loader2, Check, Zap, ShieldAlert } from "lucide-react";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
+import { getStoredToken, getBackendDirectUrl } from "@/lib/api";
 const VIDEO_EXTENSIONS = /\.(mp4|mov|mkv|avi|webm|m4v|wmv|flv|mts|m2ts|ts|mxf|prores)$/i;
 
 interface ImportMediaModalProps {
@@ -117,7 +116,13 @@ export default function ImportMediaModal({ isOpen, onClose, onSuccess }: ImportM
         });
 
         xhr.addEventListener("error", () => reject(new Error("Network error")));
-        xhr.open("POST", `${API_BASE}/api/v2/programs/upload`);
+        // Upload directly to FastAPI backend, bypassing the Next.js rewrite proxy
+        // which buffers the entire body and causes socket hang-up for multi-GB files.
+        xhr.open("POST", `${getBackendDirectUrl()}/api/v2/programs/upload`);
+        const token = getStoredToken();
+        if (token) {
+          xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+        }
         xhr.send(formData);
       });
 

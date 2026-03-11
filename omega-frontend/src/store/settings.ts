@@ -2,6 +2,7 @@
 
 import { create } from "zustand";
 import { useToastStore } from "@/store/toast";
+import { apiFetch, API_BASE } from "@/lib/api";
 
 export interface AppSettings {
   default_target_language: string;
@@ -26,7 +27,7 @@ interface SettingsStore {
   updateSettings: (partial: Partial<AppSettings>) => Promise<void>;
 }
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
+// API_BASE imported from @/lib/api
 
 export const useSettingsStore = create<SettingsStore>((set) => ({
   settings: null,
@@ -36,7 +37,7 @@ export const useSettingsStore = create<SettingsStore>((set) => ({
   fetchSettings: async () => {
     set({ loading: true, error: null });
     try {
-      const res = await fetch(`${API_BASE}/api/v2/settings`);
+      const res = await apiFetch(`${API_BASE}/api/v2/settings`);
       if (!res.ok) throw new Error(`Failed to fetch settings: ${res.status}`);
       const settings: AppSettings = await res.json();
       set({ settings, loading: false });
@@ -50,7 +51,7 @@ export const useSettingsStore = create<SettingsStore>((set) => ({
     const { addToast } = useToastStore.getState();
     set({ error: null });
     try {
-      const res = await fetch(`${API_BASE}/api/v2/settings`, {
+      const res = await apiFetch(`${API_BASE}/api/v2/settings`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(partial),

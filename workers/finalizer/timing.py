@@ -55,10 +55,11 @@ def enforce_minimum_duration(events: List[SubtitleEvent]) -> List[SubtitleEvent]
     return events
 
 
-def anchor_to_speech(event: SubtitleEvent, next_start: float = None, fps: float = 29.97) -> SubtitleEvent:
+def anchor_to_speech(event: SubtitleEvent, prev_end: float = None, next_start: float = None, fps: float = 29.97) -> SubtitleEvent:
     """
     Adjust timing to ensure comfortable reading speed (CPS).
     Extend the subtitle if the CPS is too high, up until 'next_start'.
+    If blocked by next_start, try extending backwards to 'prev_end'.
     """
     if event.duration <= 0:
         return event
@@ -68,14 +69,27 @@ def anchor_to_speech(event: SubtitleEvent, next_start: float = None, fps: float 
     if current_cps > IDEAL_CPS:
         char_count = len(event.text)
         required_duration = char_count / IDEAL_CPS
+        
+        # 1. Try extending the end time
         natural_end = event.start + required_duration
-        
-        # We can extend up to next_start - min_gap
         max_end = next_start - 0.05 if next_start else natural_end
-        
         new_end = min(natural_end, max_end)
+        
         if new_end > event.end:
             event.end = new_end
+            
+        # Recalculate duration and cps
+        current_duration = event.end - event.start
+        
+        # 2. If STILL too high, try extending the start time backwards
+        if current_duration < required_duration and prev_end is not None:
+            remaining_needed = required_duration - current_duration
+            natural_start = event.start - remaining_needed
+            min_start = prev_end + 0.05
+            new_start = max(natural_start, min_start)
+            
+            if new_start < event.start:
+                event.start = new_start
             
     return event
 
@@ -110,8 +124,9 @@ def process_timing_pipeline(
 
     # 2. Anchor to speech based on reading speed (extend fast ones).
     for i, event in enumerate(events):
+        prev_end = events[i - 1].end if i > 0 else None
         next_start = events[i + 1].start if i + 1 < len(events) else None
-        events[i] = anchor_to_speech(event, next_start, fps)
+        events[i] = anchor_to_speech(event, prev_end, next_start, fps)
 
     # 3. Final overlap check and fix.
     events = fix_overlaps(events)

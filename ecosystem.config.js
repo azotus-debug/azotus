@@ -54,7 +54,7 @@ function pickPython() {
 }
 
 const PYTHON = pickPython();
-const FASTAPI_HOST = process.env.OMEGA_FASTAPI_HOST || "127.0.0.1";
+const FASTAPI_HOST = process.env.OMEGA_FASTAPI_HOST || "0.0.0.0";
 const FASTAPI_PORT = process.env.OMEGA_FASTAPI_PORT || "8001";
 const FRONTEND_PORT = process.env.OMEGA_FRONTEND_PORT || "3000";
 const CLOUD_SQL_INSTANCE =
@@ -144,12 +144,28 @@ module.exports = {
       },
     },
     {
+      name: "omega-heartbeat",
+      cwd: ROOT,
+      script: PYTHON,
+      args: ["station_heartbeat.py"],
+      interpreter: "none",
+      autorestart: true,
+      max_restarts: 20,
+      restart_delay: 5000,
+      kill_timeout: 3000,
+      out_file: path.join(ROOT, "logs", "heartbeat.out.log"),
+      error_file: path.join(ROOT, "logs", "heartbeat.err.log"),
+      env: {
+        PYTHONUNBUFFERED: "1",
+      },
+    },
+    {
       name: "omega-frontend",
       cwd: path.join(ROOT, "omega-frontend"),
       script: "/bin/zsh",
       args: [
         "-lc",
-        "if [ ! -f .next/standalone/server.js ]; then echo 'missing standalone server build (.next/standalone/server.js)'; exit 1; fi; if [ ! -d .next/static ]; then echo 'missing frontend static build (.next/static)'; exit 1; fi; if [ ! -d .next/standalone/.next/static ]; then mkdir -p .next/standalone/.next/static && cp -R .next/static/. .next/standalone/.next/static/; fi; if [ ! -d .next/standalone/public ] && [ -d public ]; then mkdir -p .next/standalone/public && cp -R public/. .next/standalone/public/; fi; HOSTNAME=127.0.0.1 PORT=${PORT:-3000} exec node .next/standalone/server.js",
+        `if [ "\${OMEGA_FRONTEND_ENABLED:-1}" = "0" ] || [ "\${OMEGA_FRONTEND_ENABLED:-1}" = "false" ] || [ "\${OMEGA_FRONTEND_ENABLED:-1}" = "no" ]; then echo "Frontend disabled (OMEGA_FRONTEND_ENABLED=0)"; exec tail -f /dev/null; fi; if [ ! -f .next/standalone/server.js ]; then echo 'missing standalone server build (.next/standalone/server.js)'; exit 1; fi; if [ ! -d .next/static ]; then echo 'missing frontend static build (.next/static)'; exit 1; fi; rm -rf .next/standalone/.next/static && mkdir -p .next/standalone/.next/static && cp -R .next/static/. .next/standalone/.next/static/; if [ -d public ] && [ ! -d .next/standalone/public ]; then mkdir -p .next/standalone/public && cp -R public/. .next/standalone/public/; fi; HOSTNAME=127.0.0.1 PORT=\${PORT:-3000} exec node .next/standalone/server.js`,
       ],
       interpreter: "none",
       autorestart: true,

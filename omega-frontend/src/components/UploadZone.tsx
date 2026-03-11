@@ -2,6 +2,7 @@
 
 import { useState, useRef } from "react";
 import { UploadCloud, Loader2 } from "lucide-react";
+import { apiFetch } from "@/lib/api";
 
 interface UploadZoneProps {
     onUploadComplete: () => void;
@@ -24,7 +25,7 @@ export function UploadZone({ onUploadComplete }: UploadZoneProps) {
                 const formData = new FormData();
                 formData.append("file_0", files[i]);
                 formData.append("mode", "full_pipeline");
-                const res = await fetch("/api/v2/programs/upload", { method: "POST", body: formData });
+                const res = await apiFetch("/api/v2/programs/upload", { method: "POST", body: formData });
                 if (!res.ok) throw new Error("Upload Failed");
             }
             onUploadComplete();

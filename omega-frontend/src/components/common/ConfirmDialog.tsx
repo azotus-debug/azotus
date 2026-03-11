@@ -54,7 +54,7 @@ export function ConfirmDialog({
         onClick={(e) => e.stopPropagation()}
       >
         <h2 className="text-lg font-semibold text-white mb-2">{title}</h2>
-        <p className="text-sm text-gray-400 mb-6">{message}</p>
+        <p className="text-sm text-gray-400 mb-6" style={{ whiteSpace: "pre-line" }}>{message}</p>
 
         <div className="flex justify-end gap-3">
           <button

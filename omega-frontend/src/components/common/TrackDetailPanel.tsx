@@ -3,10 +3,9 @@
 import { useState, useEffect } from "react";
 import { Track, useProgramsStore } from "@/store/programs";
 import Button from "@/components/common/Button";
+import { apiFetch, API_BASE } from "@/lib/api";
 import Badge from "@/components/common/Badge";
 import ProgressBar from "@/components/common/ProgressBar";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 
 interface TrackDetailPanelProps {
   track: Track;
@@ -33,7 +32,7 @@ export default function TrackDetailPanel({ track: initialTrack, onClose }: Track
     setReviewSuccess(null);
 
     try {
-      const res = await fetch(`${API_BASE}/api/v2/tracks/${track.id}/send-review`, {
+      const res = await apiFetch(`${API_BASE}/api/v2/tracks/${track.id}/send-review`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: reviewEmail })
@@ -75,7 +74,7 @@ export default function TrackDetailPanel({ track: initialTrack, onClose }: Track
 
     const pollInterval = setInterval(async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/v2/tracks/${track.id}`);
+        const res = await apiFetch(`${API_BASE}/api/v2/tracks/${track.id}`);
         if (res.ok) {
           const updated = await res.json();
           setTrack(updated);

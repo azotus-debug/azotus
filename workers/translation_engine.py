@@ -697,7 +697,7 @@ For each, suggest a handling strategy."""
             transcript_context: Fallback full transcript if no cache
             continuity_payload: Last N translated segments from previous chunk
             glossary_terms: Optional dict of {English: Target} terms for in-prompt reinforcement
-            creative_mode: If True, use creative prompt (no char limits) — Flash QA handles mechanics
+            creative_mode: If True, use creative prompt variant (legacy, kept for compatibility)
 
         Returns:
             List of translated segment dicts [{id, text}, ...]
@@ -707,16 +707,22 @@ For each, suggest a handling strategy."""
         ideal_cps = 12 if is_icelandic else 15
         max_cps = 15 if is_icelandic else 17
 
-        # Build segment array with timing info for context
+        # Build segment array with timing info + char budget for context
         seg_array = []
         for seg in chunk_segments:
             duration = seg["end"] - seg["start"]
+            # Budget = duration × ideal_cps, capped at 84 (42 chars × 2 lines)
+            budget = min(int(max(duration, 0.5) * ideal_cps), 84)
+            # Use pre-segmenter's budget if available (more accurate)
+            if seg.get("char_budget"):
+                budget = seg["char_budget"]
             entry = {
                 "id": str(seg["id"]),
                 "start": seg["start"],
                 "end": seg["end"],
                 "duration": round(duration, 2),
                 "text": seg["text"],
+                "budget": budget,
             }
             seg_array.append(entry)
 
@@ -744,8 +750,8 @@ TRANSLATION GOALS:
 6. Use {lang_config['bible']} for scripture references.
 7. Keep translations concise — aim for broadcast brevity, but NEVER sacrifice natural flow for shortness.
 
-Do NOT worry about exact character counts or line lengths — a QA pass handles that.
-Focus 100% on producing the most natural, beautiful {lang_config['name']} possible.
+Each segment has a `budget` (max characters). Aim to stay within budget — if natural {lang_config['name']} needs a little more, that's fine, but never double it.
+Focus on producing the most natural, beautiful {lang_config['name']} possible while respecting screen width.
 
 INPUT SEGMENTS:
 {json.dumps(seg_array, ensure_ascii=False)}
@@ -754,14 +760,9 @@ Return JSON: {{"segments": [{{"id": "...", "text": "..."}}]}}"""
 
         else:
             # ── BROADCAST-QUALITY PROMPT (Gemini 3.1 Pro) ──
-            # Translation quality is the ONLY priority. The deterministic
-            # finalizer (BBC formatting rules) handles line lengths, micro-flash
-            # merging, and segment mechanics post-translation.
-            #
-            # Philosophy: LLMs are literary engines, not calculators.
-            # We stopped asking Gemini to count characters. Instead, we ask it
-            # to translate like a professional broadcast localizer and let
-            # Python handle the math.
+            # Translation quality + budget awareness. Each segment carries a
+            # char budget so Pro knows the screen constraint. Pro self-corrects
+            # violations, and the deterministic finalizer handles line breaks.
 
             glossary_line = ""
             if glossary_terms:
@@ -795,15 +796,16 @@ RULES:
 4. Key phrases stay within a single segment — never split "ÉG ER", "Heilagur Andi", or proper names across segments.
 5. Use {lang_config['bible']} for scripture references. If the speaker paraphrases, recall the official {lang_config['name']} verse.
 6. Do NOT end a segment on a dangling preposition or conjunction. If the natural {lang_config['name']} phrasing requires it, restructure the sentence.
+7. Each segment has a `budget` (max characters). Write like a professional subtitler who knows the screen width — aim to stay within budget. If natural {lang_config['name']} needs 10-15% more, that's fine. When space is tight, be a poet: find the shorter word that carries the same weight. Never double the budget.
 {glossary_line}
 WHAT NOT TO DO (common mistakes):
 - ❌ Translating word-for-word from English syntax into {lang_config['name']} word order.
 - ❌ Using passive voice where {lang_config['name']} naturally uses active or middle voice.
 - ❌ Producing a translation that is grammatically correct but sounds like a textbook.
+- ❌ Padding with filler words to fill screen time — shorter is always better if meaning is preserved.
 - ✅ Instead: write how a skilled {lang_config['name']} broadcaster would actually say it on air.
 
-Do NOT worry about exact character counts or line lengths — a formatting pass handles that.
-Focus 100% on producing the most natural, beautiful {lang_config['name']} possible.
+Focus on producing the most natural, beautiful {lang_config['name']} possible while respecting the character budget.
 
 INPUT SEGMENTS:
 {json.dumps(seg_array, ensure_ascii=False)}

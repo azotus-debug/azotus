@@ -12,8 +12,15 @@ const SHORTCUT_GROUPS: ShortcutGroup[] = [
     title: "Playback",
     shortcuts: [
       { keys: ["K", "Space"], description: "Play / Pause" },
+      { keys: ["Shift", "Space"], description: "Play current segment only" },
       { keys: ["J"], description: "Previous segment" },
       { keys: ["L"], description: "Next segment" },
+      { keys: ["["], description: "Slower playback" },
+      { keys: ["]"], description: "Faster playback" },
+      { keys: ["\u2190"], description: "Frame step back" },
+      { keys: ["\u2192"], description: "Frame step forward" },
+      { keys: ["Home"], description: "Jump to first segment" },
+      { keys: ["End"], description: "Jump to last segment" },
     ],
   },
   {
@@ -22,6 +29,23 @@ const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { keys: ["\u2318", "S"], description: "Save" },
       { keys: ["\u2318", "Z"], description: "Undo" },
       { keys: ["\u2318", "F"], description: "Search segments" },
+      { keys: ["\u2318", "H"], description: "Find & Replace" },
+      { keys: ["\u2318", "G"], description: "Go to segment #" },
+    ],
+  },
+  {
+    title: "AI Editing",
+    shortcuts: [
+      { keys: ["Shift", "Enter"], description: "Get AI alternatives (in textarea)" },
+      { keys: ["1", "2", "3"], description: "Select alternative" },
+      { keys: ["Esc"], description: "Dismiss alternatives" },
+    ],
+  },
+  {
+    title: "Layout",
+    shortcuts: [
+      { keys: ["\u2318", "B"], description: "Toggle sidebar" },
+      { keys: ["\u2318", "Shift", "V"], description: "Cycle video size" },
     ],
   },
   {

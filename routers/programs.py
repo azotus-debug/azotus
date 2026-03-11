@@ -149,6 +149,16 @@ def _extract_form_files(form_data: Any) -> list[Any]:
     return files
 
 
+async def _save_upload(upload: Any, destination: Path) -> None:
+    if isinstance(upload, _MemoryUpload):
+        destination.write_bytes(await upload.read())
+    else:
+        loop = asyncio.get_running_loop()
+        await upload.seek(0)
+        with destination.open("wb") as out_file:
+            await loop.run_in_executor(None, shutil.copyfileobj, upload.file, out_file)
+
+
 def _normalize_meta(value):
     if isinstance(value, str):
         try:
@@ -275,10 +285,10 @@ async def upload_program_media(
         vault_dir = config.VAULT_DIR / datetime.utcnow().strftime("%Y-%m") / stem
         vault_dir.mkdir(parents=True, exist_ok=True)
         video_dest = vault_dir / video_name
-        video_dest.write_bytes(await video_file.read())
+        await _save_upload(video_file, video_dest)
 
         srt_dest = config.SRT_DIR / f"DONE_{stem}.srt"
-        srt_dest.write_bytes(await srt_file.read())
+        await _save_upload(srt_file, srt_dest)
 
         await asyncio.to_thread(
             omega_db.update_job_via_track,
@@ -303,7 +313,7 @@ async def upload_program_media(
         if stem.startswith("DONE_"):
             stem = stem[5:]
         srt_dest = config.SRT_DIR / f"DONE_{stem}.srt"
-        srt_dest.write_bytes(await srt_file.read())
+        await _save_upload(srt_file, srt_dest)
         await asyncio.to_thread(
             omega_db.update_job_via_track,
             stem,
@@ -322,12 +332,12 @@ async def upload_program_media(
         vault_dir = config.VAULT_DIR / datetime.utcnow().strftime("%Y-%m") / stem
         vault_dir.mkdir(parents=True, exist_ok=True)
         video_dest = vault_dir / video_name
-        video_dest.write_bytes(await video_file.read())
+        await _save_upload(video_file, video_dest)
 
         if transcript_file:
             transcript_name = _secure_filename(transcript_file.filename or "transcript.txt")
             transcript_dest = vault_dir / transcript_name
-            transcript_dest.write_bytes(await transcript_file.read())
+            await _save_upload(transcript_file, transcript_dest)
 
         await asyncio.to_thread(
             omega_db.update_job_via_track,
@@ -352,7 +362,7 @@ async def upload_program_media(
         raise HTTPException(status_code=400, detail="Invalid filename")
 
     destination = config.INBOX_DIR / video_name
-    destination.write_bytes(await video_file.read())
+    await _save_upload(video_file, destination)
 
     # Sidecar metadata consumed by omega_manager ingest.
     sidecar_data: dict[str, Any] = {
@@ -376,6 +386,7 @@ async def upload_program_media(
 @router.get("/programs")
 async def list_programs(
     client: str = Query(None),
+    station: str = Query(None, description="Filter by station_id. Use 'all' to see all stations."),
     limit: int = Query(100),
     db: AsyncSession = Depends(get_db),
 ):
@@ -386,6 +397,13 @@ async def list_programs(
 
     result = await db.execute(stmt)
     programs = result.scalars().all()
+
+    # Determine station filter: explicit param > OMEGA_UI_SCOPE config > show all
+    station_filter = None
+    if station and station != "all":
+        station_filter = station
+    elif not station and getattr(config, "OMEGA_UI_SCOPE", "all") == "station":
+        station_filter = config.OMEGA_STATION_ID
 
     output = []
     for program in programs:
@@ -399,6 +417,24 @@ async def list_programs(
         _hydrate_track_job_ids(tracks)
         _hydrate_track_file_paths(tracks)
         p_dict["tracks"] = tracks
+
+        # Station filtering: skip programs that have no tracks belonging to this station
+        if station_filter:
+            has_station_track = False
+            for t in tracks:
+                t_meta = t.get("meta") or {}
+                if isinstance(t_meta, str):
+                    try:
+                        t_meta = json.loads(t_meta)
+                    except Exception:
+                        t_meta = {}
+                t_station = t_meta.get("station_id", "")
+                if t_station == station_filter or not t_station:
+                    # Match this station, or unassigned jobs (visible to all)
+                    has_station_track = True
+                    break
+            if not has_station_track:
+                continue
 
         total_tracks = len(tracks)
         complete_tracks = sum(

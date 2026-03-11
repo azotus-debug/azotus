@@ -11,6 +11,7 @@ import TrackDetailPanel from "@/components/common/TrackDetailPanel";
 import { useNavigation } from "@/store/navigation";
 import { useProgramsStore, Track } from "@/store/programs";
 import { useRealtime } from "@/contexts/RealtimeContext";
+import { apiFetch, API_BASE } from "@/lib/api";
 
 interface Props {
   programId: string;
@@ -23,8 +24,6 @@ interface MasterSummary {
   locked_at?: string | null;
   locked_by?: string | null;
 }
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 
 const FLAG_MAP: Record<string, string> = {
   is: "🇮🇸",
@@ -225,7 +224,7 @@ export default function ProgramDetailView({ programId }: Props) {
       const results = await Promise.all(
         missing.map(async (id) => {
           try {
-            const res = await fetch(`${API_BASE}/api/v2/master-scripts/${id}`);
+            const res = await apiFetch(`${API_BASE}/api/v2/master-scripts/${id}`);
             const data = await res.json();
             if (!res.ok) {
               masterFailures.current.add(id);

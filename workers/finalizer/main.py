@@ -6,8 +6,9 @@ from pathlib import Path
 from typing import List, Tuple, Optional
 
 import config
+from subtitle_standards import MAX_CHARS_PER_LINE
 from .models import SubtitleEvent
-from .formatting import strip_metadata_tags, split_into_balanced_lines
+from .formatting import strip_metadata_tags, split_into_balanced_lines, add_speaker_dashes
 from .timing import process_timing_pipeline
 from .qa import generate_qa_report
 from .exporters import generate_srt, generate_vtt, generate_ttml
@@ -20,25 +21,38 @@ def normalize_segments_for_review(segments: list, target_language: str = "is") -
     Transforms raw translation JSON segments into pre-timed, broadcast-safe dictionaries
     for human review in the frontend.
     """
+    _INTERJECTIONS = {
+        "amen", "já", "halelúja", "hallelujah", "halleluja", "praise god",
+        "lof sé guði", "ó", "oh", "wow", "yes", "come on", "that's right",
+        "glory", "dýrð", "jesús", "jesus",
+    }
     normalized = []
-    
+
     # 1. Parse into strict models
     events = [SubtitleEvent.from_dict(seg) for seg in segments]
     
+    # 1b. Add speaker dashes if needed
+    events = add_speaker_dashes(events)
+
     # 2. Extract formatting logic (strip metadata, break lines)
     for event in events:
         if event.is_audio_event and not event.preserve_in_subtitle:
             # Drop pure metadata audio events like [MUSIC]
             continue
-            
+
         clean_text = strip_metadata_tags(event.text)
         if not clean_text.strip():
             continue
-            
+
+        # Filter standalone interjections (audience reactions)
+        stripped = re.sub(r'[.!?,;:\s]+', ' ', clean_text).strip().lower()
+        if stripped in _INTERJECTIONS:
+            continue
+
         # Break lines according to Broadcast standards (42 chars max)
         event.lines = split_into_balanced_lines(clean_text, target_language)
         event.text = clean_text  # Store the flat cleaned text
-        
+
         normalized.append(event)
         
     # 3. Apply timing mathematics (enforce minimums, fix overlaps)
@@ -88,6 +102,13 @@ def finalize(
         )
 
     # 2. Build Models
+    # Standalone interjections (audience "Amen", etc.) — visual clutter on broadcast
+    _INTERJECTIONS = {
+        "amen", "já", "halelúja", "hallelujah", "halleluja", "praise god",
+        "lof sé guði", "ó", "oh", "wow", "yes", "come on", "that's right",
+        "glory", "dýrð", "jesús", "jesus",
+    }
+    interjection_count = 0
     events = []
     for seg in raw_segments:
         ev = SubtitleEvent.from_dict(seg)
@@ -95,11 +116,22 @@ def finalize(
             continue
         # Apply strict formatting again just in case reviewing altered line lengths
         clean_text = strip_metadata_tags(ev.text)
-        if clean_text:
-            ev.lines = split_into_balanced_lines(clean_text, target_language)
-            ev.text = clean_text
-            events.append(ev)
-            
+        if not clean_text:
+            continue
+        # Filter standalone interjections (audience reactions)
+        stripped = re.sub(r'[.!?,;:\s]+', ' ', clean_text).strip().lower()
+        if stripped in _INTERJECTIONS:
+            interjection_count += 1
+            continue
+        ev.lines = split_into_balanced_lines(clean_text, target_language)
+        ev.text = clean_text
+        events.append(ev)
+
+    events = add_speaker_dashes(events)
+
+    if interjection_count:
+        logger.info(f"   🗣️ Filtered {interjection_count} standalone interjections (audience reactions)")
+
     # 3. Full Timing Pipeline (anchoring CPS, overlap fixes, frame quantization)
     events = process_timing_pipeline(
         events,
@@ -108,11 +140,44 @@ def finalize(
         apply_scene_snap=apply_scene_snap,
     )
     
+    # 3b. Final line enforcement — re-split any lines that still exceed 42 chars
+    #     (timing pipeline may merge events, altering text that was previously split)
+    resplit_count = 0
+    for ev in events:
+        needs_resplit = False
+        if ev.lines:
+            for line in ev.lines:
+                if len(line) > MAX_CHARS_PER_LINE:
+                    needs_resplit = True
+                    break
+        if needs_resplit:
+            ev.lines = split_into_balanced_lines(ev.text, target_language)
+            resplit_count += 1
+    if resplit_count:
+        logger.info(f"   📏 Re-split {resplit_count} subtitles for 42-char enforcement")
+
+    # 3c. Double-dot cleanup — runs LAST before export to catch any artifacts
+    #     that earlier processing may have introduced
+    dd_fixes = 0
+    for ev in events:
+        if ev.lines:
+            new_lines = []
+            for line in ev.lines:
+                fixed = re.sub(r'(?<!\.)\.\.(?!\.)', '...', line)
+                if fixed != line:
+                    dd_fixes += 1
+                new_lines.append(fixed)
+            ev.lines = new_lines
+        if ev.text:
+            ev.text = re.sub(r'(?<!\.)\.\.(?!\.)', '...', ev.text)
+    if dd_fixes:
+        logger.info(f"   🔧 Fixed {dd_fixes} double-dot artifacts → ellipsis")
+
     # QA Check (Passive warning generation)
     qa_report = generate_qa_report(events)
     if qa_report.get("high_cps_violations", 0) > 0:
         logger.warning(f"   ⚠️ QA Warning: {qa_report['high_cps_violations']} subtitles exceed 20 CPS.")
-        
+
     # 4. Exports
     srt_path = config.SRT_DIR / f"{stem}.srt"
     vtt_path = config.SRT_DIR / f"{stem}.vtt"

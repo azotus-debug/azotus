@@ -1,6 +1,8 @@
 "use client";
 
 import { create } from "zustand";
+import { useToastStore } from "@/store/toast";
+import { apiFetch, API_BASE } from "@/lib/api";
 
 // Types for Operations Command Center
 
@@ -116,7 +118,7 @@ interface OpsStore {
   handleSSEEvent: (eventType: string, data: unknown) => void;
 }
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
+// API_BASE imported from @/lib/api
 
 export const useOpsStore = create<OpsStore>((set, get) => ({
   // Initial state
@@ -135,12 +137,13 @@ export const useOpsStore = create<OpsStore>((set, get) => ({
   fetchSummary: async () => {
     set({ loadingSummary: true, error: null });
     try {
-      const res = await fetch(`${API_BASE}/api/v2/ops/summary`);
+      const res = await apiFetch(`${API_BASE}/api/v2/ops/summary`);
       if (!res.ok) throw new Error(`Failed to fetch summary: ${res.status}`);
       const summary = await res.json();
       set({ summary, loadingSummary: false });
     } catch (e) {
       set({ error: (e as Error).message, loadingSummary: false });
+      useToastStore.getState().addToast("Failed to load ops summary", "error");
     }
   },
 
@@ -158,6 +161,7 @@ export const useOpsStore = create<OpsStore>((set, get) => ({
       set({ queue: data.tracks || [], loadingQueue: false });
     } catch (e) {
       set({ error: (e as Error).message, loadingQueue: false });
+      useToastStore.getState().addToast("Failed to load queue", "error");
     }
   },
 
@@ -178,6 +182,7 @@ export const useOpsStore = create<OpsStore>((set, get) => ({
       });
     } catch (e) {
       set({ error: (e as Error).message, loadingDeliveries: false });
+      useToastStore.getState().addToast("Failed to load deliveries", "error");
     }
   },
 
@@ -217,7 +222,7 @@ export const useOpsStore = create<OpsStore>((set, get) => ({
     set({ executingAction: true, error: null, lastActionResult: null });
 
     try {
-      const res = await fetch(`${API_BASE}/api/v2/ops/actions`, {
+      const res = await apiFetch(`${API_BASE}/api/v2/ops/actions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -234,6 +239,7 @@ export const useOpsStore = create<OpsStore>((set, get) => ({
 
       const result: BatchActionResponse = await res.json();
       set({ lastActionResult: result, executingAction: false });
+      useToastStore.getState().addToast("Batch action completed", "success");
 
       // Refresh data after action
       get().refreshAll();
@@ -246,6 +252,7 @@ export const useOpsStore = create<OpsStore>((set, get) => ({
       return result;
     } catch (e) {
       set({ error: (e as Error).message, executingAction: false });
+      useToastStore.getState().addToast((e as Error).message, "error");
       return null;
     }
   },

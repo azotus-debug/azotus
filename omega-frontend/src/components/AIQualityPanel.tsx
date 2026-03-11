@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { AlertTriangle, CheckCircle2, Star, ChevronDown, ChevronRight } from "lucide-react";
+import { apiFetch } from "@/lib/api";
 
 // =============================================================================
 // Types
@@ -95,7 +96,7 @@ export function AIQualityPanel({ jobId, editorReport, onJumpToSegment }: AIQuali
             }
 
             try {
-                const res = await fetch(`/api/editor/${encodeURIComponent(jobId)}`);
+                const res = await apiFetch(`/api/editor/${encodeURIComponent(jobId)}`);
                 if (!res.ok) throw new Error(`Failed to load editor context: ${res.status}`);
                 const payload = await res.json();
                 const rawReport =

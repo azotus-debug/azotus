@@ -2,6 +2,7 @@
 
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { io, Socket } from 'socket.io-client';
+import { getStoredToken } from '@/lib/api';
 
 interface RealtimeContextType {
     socket: Socket | null;
@@ -27,19 +28,22 @@ export const RealtimeProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const [isConnected, setIsConnected] = useState(false);
 
     useEffect(() => {
+        const token = getStoredToken();
+
         // Initialize standard polling transport that eagerly upgrades to websocket
         const socketInstance = io(SOCKET_URL, {
             reconnectionAttempts: 5,
             reconnectionDelay: 1000,
+            auth: token ? { token } : undefined,
         });
 
         socketInstance.on('connect', () => {
-            console.log('🟢 Connected to Omega Realtime Core');
+            console.log('Connected to Omega Realtime Core');
             setIsConnected(true);
         });
 
         socketInstance.on('disconnect', () => {
-            console.warn('🔴 Disconnected from Omega Realtime Core');
+            console.warn('Disconnected from Omega Realtime Core');
             setIsConnected(false);
         });
 

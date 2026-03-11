@@ -2,8 +2,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useProgramsStore, Program } from '@/store/programs';
 import { useRealtime } from '@/contexts/RealtimeContext';
 import { useEffect } from 'react';
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
+import { apiFetch, API_BASE } from '@/lib/api';
 
 export function useProgramsQuery() {
     const queryClient = useQueryClient();
@@ -12,7 +11,7 @@ export function useProgramsQuery() {
     const query = useQuery({
         queryKey: ['programs'],
         queryFn: async (): Promise<Program[]> => {
-            const res = await fetch(`${API_BASE}/api/v2/programs`);
+            const res = await apiFetch(`${API_BASE}/api/v2/programs`);
             if (!res.ok) throw new Error(`Failed to fetch programs: ${res.status}`);
             return await res.json();
         },

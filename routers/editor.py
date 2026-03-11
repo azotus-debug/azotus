@@ -23,7 +23,7 @@ from fastapi.responses import JSONResponse, FileResponse
 
 import config
 import omega_db
-from routers import admin_required
+from routers import admin_required, reviewer_or_admin
 
 logger = logging.getLogger("OmegaFastAPI")
 
@@ -280,11 +280,61 @@ async def assistant_chat(request: Request, _=Depends(admin_required)):
 
 
 # ---------------------------------------------------------------------------
+# 3b. AI Editing — Batch QC Fix + Alternatives
+# ---------------------------------------------------------------------------
+
+@router.post("/api/editor/{job_id}/ai/batch-fix")
+async def ai_batch_fix(job_id: str, request: Request, _=Depends(admin_required)):
+    """AI-fix all QC violations. Returns suggestions only (no disk write)."""
+    try:
+        body = await request.json()
+        segments = body.get("segments", [])
+
+        if not segments:
+            return {"fixes": []}
+
+        from workers import ai_editor
+
+        fixes = await asyncio.to_thread(ai_editor.batch_qc_fix, segments)
+        return {"fixes": fixes}
+
+    except Exception as e:
+        logger.error("AI Batch Fix Failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/editor/{job_id}/ai/alternatives")
+async def ai_alternatives(job_id: str, request: Request, _=Depends(admin_required)):
+    """Get 3 alternative translations for a single segment."""
+    try:
+        body = await request.json()
+        segment = body.get("segment")
+        context_before = body.get("context_before", [])
+        context_after = body.get("context_after", [])
+
+        if not segment:
+            raise HTTPException(status_code=400, detail="Missing segment")
+
+        from workers import ai_editor
+
+        alts = await asyncio.to_thread(
+            ai_editor.get_alternatives, segment, context_before, context_after
+        )
+        return {"alternatives": alts}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("AI Alternatives Failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
 # 4. GET/POST /api/editor/{job_id}
 # ---------------------------------------------------------------------------
 
 @router.get("/api/editor/{job_id}")
-async def editor_get(job_id: str, _=Depends(admin_required)):
+async def editor_get(job_id: str, _=Depends(reviewer_or_admin)):
     try:
         from workers import assistant
 
@@ -315,6 +365,27 @@ async def editor_get(job_id: str, _=Depends(admin_required)):
 
         track = await asyncio.to_thread(omega_db.get_track_by_job, job_id)
 
+        # Extract track metadata for Bunny CDN lookup
+        meta = {}
+        if track:
+            raw_meta = track.get("meta", {})
+            if isinstance(raw_meta, str):
+                try:
+                    meta = json.loads(raw_meta)
+                except Exception:
+                    meta = {}
+            else:
+                meta = raw_meta or {}
+
+        # Bunny CDN video URLs for remote playback
+        bunny_direct_url = None
+        bunny_embed_url = None
+        if meta.get("bunny_video_id"):
+            import os
+            cdn_host = os.environ.get("BUNNY_CDN_HOSTNAME", "vz-5303b4c4-db0.b-cdn.net")
+            bunny_direct_url = f"https://{cdn_host}/{meta['bunny_video_id']}/play_480p.mp4"
+            bunny_embed_url = meta.get("bunny_embed_url")
+
         return {
             "job_id": job_id,
             "file_path": str(file_path),
@@ -322,6 +393,8 @@ async def editor_get(job_id: str, _=Depends(admin_required)):
             "graphic_zones": data.get("graphic_zones", []) if isinstance(data, dict) else [],
             "history": data.get("history", []) if isinstance(data, dict) else [],
             "track": track,
+            "bunny_direct_url": bunny_direct_url,
+            "bunny_embed_url": bunny_embed_url,
         }
 
     except HTTPException:
@@ -334,6 +407,16 @@ async def editor_get(job_id: str, _=Depends(admin_required)):
 @router.post("/api/editor/{job_id}")
 async def editor_post(job_id: str, request: Request, _=Depends(admin_required)):
     try:
+        # Lock guard: verify current user holds the editor lock
+        track = await asyncio.to_thread(omega_db.get_track_by_job, job_id)
+        if track and track.get("locked_by"):
+            username = _get_lock_user(request)
+            if track["locked_by"] != username:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Job is locked by {track['locked_by']}. Cannot save.",
+                )
+
         from workers import assistant, finalizer
 
         file_path, _existing = await asyncio.to_thread(assistant._load_job_file, job_id)
@@ -550,7 +633,156 @@ async def editor_post(job_id: str, request: Request, _=Depends(admin_required)):
 
 
 # ---------------------------------------------------------------------------
-# 5. GET /api/stream/{job_id}
+# 5. Editor Lock — acquire / release / check
+# ---------------------------------------------------------------------------
+
+LOCK_STALE_MINUTES = 30
+
+
+def _get_lock_user(request: Request) -> str:
+    """Return the username of the authenticated user from request state."""
+    user = getattr(request.state, "user", None)
+    if isinstance(user, dict):
+        return user.get("sub", "unknown")
+    return "unknown"
+
+
+@router.post("/api/editor/{job_id}/lock")
+async def acquire_lock(job_id: str, request: Request, _=Depends(admin_required)):
+    """Acquire an editor lock on a job. Returns 409 if already locked by someone else."""
+    try:
+        track = await asyncio.to_thread(omega_db.get_track_by_job, job_id)
+        if not track:
+            raise HTTPException(status_code=404, detail="Track not found")
+
+        username = _get_lock_user(request)
+        now = datetime.now()
+
+        # Check existing lock
+        if track.get("locked_by") and track.get("locked_at"):
+            locked_at = datetime.fromisoformat(track["locked_at"])
+            age_minutes = (now - locked_at).total_seconds() / 60
+
+            if track["locked_by"] == username:
+                # Refresh own lock
+                await asyncio.to_thread(
+                    omega_db.update_track, track["id"],
+                    locked_by=username, locked_at=now.isoformat()
+                )
+                return {"locked": True, "locked_by": username, "locked_at": now.isoformat()}
+
+            if age_minutes < LOCK_STALE_MINUTES:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": "Job is locked",
+                        "locked_by": track["locked_by"],
+                        "locked_at": track["locked_at"],
+                        "stale_override_minutes": LOCK_STALE_MINUTES,
+                    },
+                )
+            # Stale lock — override
+            logger.warning(
+                "Lock override: %s taking lock from %s (stale %.0f min)",
+                username, track["locked_by"], age_minutes,
+            )
+
+        await asyncio.to_thread(
+            omega_db.update_track, track["id"],
+            locked_by=username, locked_at=now.isoformat()
+        )
+
+        # Broadcast lock change via Socket.IO
+        try:
+            from api_main import sio
+            await sio.emit("lock_changed", {
+                "job_id": job_id,
+                "locked_by": username,
+                "locked_at": now.isoformat(),
+            }, room=f"job_{job_id}")
+        except Exception:
+            pass
+
+        return {"locked": True, "locked_by": username, "locked_at": now.isoformat()}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Lock acquire failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/api/editor/{job_id}/lock")
+async def release_lock(job_id: str, request: Request, _=Depends(admin_required)):
+    """Release an editor lock on a job."""
+    try:
+        track = await asyncio.to_thread(omega_db.get_track_by_job, job_id)
+        if not track:
+            raise HTTPException(status_code=404, detail="Track not found")
+
+        username = _get_lock_user(request)
+
+        # Only the lock holder or an admin overriding a stale lock can release
+        if track.get("locked_by") and track["locked_by"] != username:
+            user_state = getattr(request.state, "user", {})
+            if isinstance(user_state, dict) and user_state.get("role") != "admin":
+                raise HTTPException(status_code=403, detail="Cannot release another user's lock")
+
+        await asyncio.to_thread(
+            omega_db.update_track, track["id"],
+            locked_by=None, locked_at=None
+        )
+
+        # Broadcast lock change
+        try:
+            from api_main import sio
+            await sio.emit("lock_changed", {
+                "job_id": job_id,
+                "locked_by": None,
+                "locked_at": None,
+            }, room=f"job_{job_id}")
+        except Exception:
+            pass
+
+        return {"locked": False}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Lock release failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/editor/{job_id}/lock")
+async def check_lock(job_id: str, _=Depends(admin_required)):
+    """Check current lock status for a job."""
+    try:
+        track = await asyncio.to_thread(omega_db.get_track_by_job, job_id)
+        if not track:
+            raise HTTPException(status_code=404, detail="Track not found")
+
+        locked_by = track.get("locked_by")
+        locked_at = track.get("locked_at")
+
+        if locked_by and locked_at:
+            age = (datetime.now() - datetime.fromisoformat(locked_at)).total_seconds() / 60
+            return {
+                "locked": True,
+                "locked_by": locked_by,
+                "locked_at": locked_at,
+                "stale": age >= LOCK_STALE_MINUTES,
+            }
+        return {"locked": False}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Lock check failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# 6. GET /api/stream/{job_id}
 # ---------------------------------------------------------------------------
 
 @router.get("/api/stream/{job_id}")
@@ -626,6 +858,19 @@ async def stream_video(job_id: str):
                     video_path = candidate
                     break
 
+        # Priority 4: Bunny CDN redirect (remote playback)
+        if not video_path:
+            bunny_video_id = meta.get("bunny_video_id")
+            if bunny_video_id:
+                import os
+                cdn_host = os.environ.get(
+                    "BUNNY_CDN_HOSTNAME", "vz-5303b4c4-db0.b-cdn.net"
+                )
+                cdn_url = f"https://{cdn_host}/{bunny_video_id}/play_480p.mp4"
+                logger.info("Stream %s: local not found, redirecting to Bunny CDN", job_id)
+                from starlette.responses import RedirectResponse
+                return RedirectResponse(url=cdn_url, status_code=302)
+
         if not video_path:
             raise HTTPException(
                 status_code=404,
@@ -656,4 +901,156 @@ async def stream_video(job_id: str):
         raise
     except Exception as e:
         logger.error("Stream Failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# 7. GET /api/editor/{job_id}/export/{format}
+# ---------------------------------------------------------------------------
+
+@router.get("/api/editor/{job_id}/export/{fmt}")
+async def export_subtitles(job_id: str, fmt: str, _=Depends(admin_required)):
+    """Export current segments as SRT, VTT, or TTML."""
+    fmt = fmt.lower()
+    if fmt not in ("srt", "vtt", "ttml"):
+        raise HTTPException(status_code=400, detail=f"Unsupported format: {fmt}")
+
+    try:
+        from workers import assistant
+        from workers.finalizer.models import SubtitleEvent
+        from workers.finalizer.exporters import generate_srt, generate_vtt, generate_ttml
+
+        file_path, data = await asyncio.to_thread(assistant._load_job_file, job_id)
+        if not file_path or not data:
+            raise HTTPException(status_code=404, detail="Job file not found")
+
+        segments = data.get("segments", []) if isinstance(data, dict) else data
+        if not segments:
+            raise HTTPException(status_code=404, detail="No segments found")
+
+        events = [SubtitleEvent.from_dict(s) for s in segments if isinstance(s, dict)]
+
+        # Determine language code for TTML
+        track = await asyncio.to_thread(omega_db.get_track_by_job, job_id)
+        lang_code = "is"
+        if track:
+            lang_code = track.get("language_code") or "is"
+            meta = track.get("meta", {})
+            if isinstance(meta, dict):
+                lang_code = meta.get("target_language") or lang_code
+
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=f".{fmt}", delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+
+        if fmt == "srt":
+            await asyncio.to_thread(generate_srt, events, tmp_path)
+            media = "text/plain"
+        elif fmt == "vtt":
+            await asyncio.to_thread(generate_vtt, events, tmp_path)
+            media = "text/vtt"
+        else:
+            await asyncio.to_thread(generate_ttml, events, tmp_path, lang_code)
+            media = "application/ttml+xml"
+
+        return FileResponse(
+            path=str(tmp_path),
+            media_type=media,
+            filename=f"{job_id}.{fmt}",
+            headers={"Content-Disposition": f'attachment; filename="{job_id}.{fmt}"'},
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Export failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# 8. Review actions — approve / reject
+# ---------------------------------------------------------------------------
+
+@router.post("/api/editor/{job_id}/approve")
+async def approve_review(job_id: str, request: Request, _=Depends(reviewer_or_admin)):
+    """Approve a review — records approval in track meta and triggers finalization."""
+    try:
+        body = await request.json()
+        comments = body.get("comments", "")
+        reviewer = _get_lock_user(request)
+
+        track = await asyncio.to_thread(omega_db.get_track_by_job, job_id)
+        if not track:
+            raise HTTPException(status_code=404, detail="Track not found")
+
+        now_iso = datetime.now().isoformat()
+        await asyncio.to_thread(
+            omega_db.update_track, track["id"],
+            meta={
+                "review_status": "approved",
+                "reviewed_by": reviewer,
+                "reviewed_at": now_iso,
+                "review_comments": comments,
+            },
+        )
+
+        # Trigger finalization
+        try:
+            from workers import finalizer, assistant
+            file_path, data = await asyncio.to_thread(assistant._load_job_file, job_id)
+            if file_path and data:
+                segments = data.get("segments", []) if isinstance(data, dict) else data
+                lang = track.get("language_code") or "is"
+                meta = track.get("meta", {})
+                if isinstance(meta, dict):
+                    lang = meta.get("target_language") or lang
+                await asyncio.to_thread(finalizer.finalize, file_path, target_language=lang)
+                await asyncio.to_thread(
+                    omega_db.update_job_via_track, job_id,
+                    stage="FINALIZED", status="Approved & Finalized", progress=95.0,
+                    meta={"approved_at": now_iso, "approved_by": reviewer},
+                )
+                logger.info("Review approved for %s by %s — finalization triggered", job_id, reviewer)
+        except Exception as finalize_err:
+            logger.error("Post-approval finalization failed: %s", finalize_err, exc_info=True)
+
+        return {"status": "approved", "reviewed_by": reviewer, "reviewed_at": now_iso}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Approve failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/editor/{job_id}/reject")
+async def reject_review(job_id: str, request: Request, _=Depends(reviewer_or_admin)):
+    """Reject a review — records rejection and comments in track meta."""
+    try:
+        body = await request.json()
+        comments = body.get("comments", "")
+        reviewer = _get_lock_user(request)
+
+        track = await asyncio.to_thread(omega_db.get_track_by_job, job_id)
+        if not track:
+            raise HTTPException(status_code=404, detail="Track not found")
+
+        now_iso = datetime.now().isoformat()
+        await asyncio.to_thread(
+            omega_db.update_track, track["id"],
+            meta={
+                "review_status": "changes_requested",
+                "reviewed_by": reviewer,
+                "reviewed_at": now_iso,
+                "review_comments": comments,
+            },
+        )
+
+        logger.info("Review rejected for %s by %s: %s", job_id, reviewer, comments[:100])
+        return {"status": "changes_requested", "reviewed_by": reviewer, "reviewed_at": now_iso}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Reject failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))

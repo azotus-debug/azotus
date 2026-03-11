@@ -3,9 +3,8 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useRealtime } from "@/contexts/RealtimeContext";
 import ProgressBar from "@/components/common/ProgressBar";
+import { apiFetch, API_BASE } from "@/lib/api";
 import { ChevronDown } from "lucide-react";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -86,7 +85,7 @@ export default function CloudWorkersPanel() {
   // Fetch cloud status
   const fetchStatus = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/v2/cloud/status`);
+      const res = await apiFetch(`${API_BASE}/api/v2/cloud/status`);
       if (!res.ok) return;
       const json: CloudStatus = await res.json();
       setData(json);

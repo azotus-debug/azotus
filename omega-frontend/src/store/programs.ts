@@ -1,6 +1,8 @@
 "use client";
 
 import { create } from "zustand";
+import { useToastStore } from "@/store/toast";
+import { apiFetch, API_BASE } from "@/lib/api";
 
 // Types matching API v2 responses
 export interface Track {
@@ -116,10 +118,11 @@ interface ProgramsStore {
     sendTrackToReview: (trackId: string) => Promise<boolean>;
     approveTrack: (trackId: string) => Promise<boolean>;
     revealFile: (trackId: string, fileType: 'video' | 'srt') => Promise<boolean>;
+    deleteProgram: (programId: string) => Promise<boolean>;
     handleSSEEvent: (eventType: string, data: unknown) => void;
 }
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
+// API_BASE imported from @/lib/api
 
 export const useProgramsStore = create<ProgramsStore>((set, get) => ({
     programs: [],
@@ -134,7 +137,7 @@ export const useProgramsStore = create<ProgramsStore>((set, get) => ({
     fetchPrograms: async () => {
         set({ loading: true, error: null });
         try {
-            const res = await fetch(`${API_BASE}/api/v2/programs`);
+            const res = await apiFetch(`${API_BASE}/api/v2/programs`);
             if (!res.ok) throw new Error(`Failed to fetch programs: ${res.status}`);
             const programs = await res.json();
             set({ programs, loading: false });
@@ -145,56 +148,61 @@ export const useProgramsStore = create<ProgramsStore>((set, get) => ({
 
     fetchActiveTracks: async () => {
         try {
-            const res = await fetch(`${API_BASE}/api/v2/tracks/active`);
+            const res = await apiFetch(`${API_BASE}/api/v2/tracks/active`);
             if (!res.ok) throw new Error(`Failed to fetch active tracks: ${res.status}`);
             const activeTracks = await res.json();
             set({ activeTracks });
         } catch (e) {
             console.error("Failed to fetch active tracks:", e);
+            useToastStore.getState().addToast("Failed to load active tracks", "error");
         }
     },
 
     fetchDeliveries: async (days = 7) => {
         try {
-            const res = await fetch(`${API_BASE}/api/v2/deliveries?days=${days}`);
+            const res = await apiFetch(`${API_BASE}/api/v2/deliveries?days=${days}`);
             if (!res.ok) throw new Error(`Failed to fetch deliveries: ${res.status}`);
             const deliveries = await res.json();
             set({ deliveries });
         } catch (e) {
             console.error("Failed to fetch deliveries:", e);
+            useToastStore.getState().addToast("Failed to load deliveries", "error");
         }
     },
 
     fetchPipelineStats: async () => {
         try {
-            const res = await fetch(`${API_BASE}/api/v2/pipeline/stats`);
+            const res = await apiFetch(`${API_BASE}/api/v2/pipeline/stats`);
             if (!res.ok) throw new Error(`Failed to fetch pipeline stats: ${res.status}`);
             const pipelineStats = await res.json();
             set({ pipelineStats });
         } catch (e) {
             console.error("Failed to fetch pipeline stats:", e);
+            useToastStore.getState().addToast("Failed to load pipeline stats", "error");
         }
     },
 
     fetchLanguages: async () => {
         try {
-            const res = await fetch(`${API_BASE}/api/v2/languages`);
+            const res = await apiFetch(`${API_BASE}/api/v2/languages`);
             if (!res.ok) throw new Error(`Failed to fetch languages: ${res.status}`);
             const data = await res.json();
             set({ languages: data.languages || [] });
         } catch (e) {
             console.error("Failed to fetch languages:", e);
+            useToastStore.getState().addToast("Failed to load languages", "error");
         }
     },
 
     fetchVoices: async () => {
         try {
-            const res = await fetch(`${API_BASE}/api/v2/voices`);
+            const res = await apiFetch(`${API_BASE}/api/v2/voices`);
             if (!res.ok) throw new Error(`Failed to fetch voices: ${res.status}`);
             const data = await res.json();
             set({ voices: data.voices || [] });
         } catch (e) {
             console.error("Failed to fetch voices:", e);
+            useToastStore.getState().addToast("Failed to load voices", "error");
         }
     },
 
@@ -204,7 +212,7 @@ export const useProgramsStore = create<ProgramsStore>((set, get) => ({
 
     addTrack: async (programId, type, languageCode, voiceId) => {
         try {
-            const res = await fetch(`${API_BASE}/api/v2/programs/${programId}/tracks`, {
+            const res = await apiFetch(`${API_BASE}/api/v2/programs/${programId}/tracks`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ type, language_code: languageCode, voice_id: voiceId }),
@@ -215,16 +223,18 @@ export const useProgramsStore = create<ProgramsStore>((set, get) => ({
             }
             // Refresh programs to get updated tracks
             await get().fetchPrograms();
+            useToastStore.getState().addToast("Track added successfully", "success");
             return { ok: true, trackId: data.track_id, stage: data.stage };
         } catch (e) {
             console.error("Failed to add track:", e);
+            useToastStore.getState().addToast("Failed to add track", "error");
             return { ok: false, error: (e as Error).message || "Failed to add track" };
         }
     },
 
     startDubbing: async (trackId) => {
         try {
-            const res = await fetch(`${API_BASE}/api/v2/tracks/${trackId}/start-dub`, {
+            const res = await apiFetch(`${API_BASE}/api/v2/tracks/${trackId}/start-dub`, {
                 method: "POST",
             });
             if (!res.ok) throw new Error("Failed to start dubbing");
@@ -232,13 +242,14 @@ export const useProgramsStore = create<ProgramsStore>((set, get) => ({
             return true;
         } catch (e) {
             console.error("Failed to start dubbing:", e);
+            useToastStore.getState().addToast("Failed to start dubbing", "error");
             return false;
         }
     },
 
     recordDelivery: async (trackId, destination, recipient, notes, notify) => {
         try {
-            const res = await fetch(`${API_BASE}/api/v2/deliveries`, {
+            const res = await apiFetch(`${API_BASE}/api/v2/deliveries`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ track_id: trackId, method: destination, recipient, notes, ...notify }),
@@ -247,46 +258,52 @@ export const useProgramsStore = create<ProgramsStore>((set, get) => ({
             // Refresh data
             await get().fetchPrograms();
             await get().fetchDeliveries();
+            useToastStore.getState().addToast("Delivery recorded", "success");
             return true;
         } catch (e) {
             console.error("Failed to record delivery:", e);
+            useToastStore.getState().addToast("Failed to record delivery", "error");
             return false;
         }
     },
 
     sendTrackToReview: async (trackId) => {
         try {
-            const res = await fetch(`${API_BASE}/api/v2/tracks/${trackId}/send-to-review`, {
+            const res = await apiFetch(`${API_BASE}/api/v2/tracks/${trackId}/send-to-review`, {
                 method: "POST",
             });
             if (!res.ok) throw new Error("Failed to send track to review");
             await get().fetchPrograms();
             await get().fetchActiveTracks();
+            useToastStore.getState().addToast("Sent for review", "success");
             return true;
         } catch (e) {
             console.error("Failed to send track to review:", e);
+            useToastStore.getState().addToast("Failed to send to review", "error");
             return false;
         }
     },
 
     approveTrack: async (trackId) => {
         try {
-            const res = await fetch(`${API_BASE}/api/v2/tracks/${trackId}/approve`, {
+            const res = await apiFetch(`${API_BASE}/api/v2/tracks/${trackId}/approve`, {
                 method: "POST",
             });
             if (!res.ok) throw new Error("Failed to approve track");
             await get().fetchPrograms();
             await get().fetchActiveTracks();
+            useToastStore.getState().addToast("Track approved", "success");
             return true;
         } catch (e) {
             console.error("Failed to approve track:", e);
+            useToastStore.getState().addToast("Failed to approve track", "error");
             return false;
         }
     },
 
     revealFile: async (trackId, fileType) => {
         try {
-            const res = await fetch(`${API_BASE}/api/v2/tracks/${trackId}/reveal`, {
+            const res = await apiFetch(`${API_BASE}/api/v2/tracks/${trackId}/reveal`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ type: fileType }),
@@ -295,6 +312,28 @@ export const useProgramsStore = create<ProgramsStore>((set, get) => ({
             return true;
         } catch (e) {
             console.error("Failed to reveal file:", e);
+            useToastStore.getState().addToast("Failed to reveal file", "error");
+            return false;
+        }
+    },
+
+    deleteProgram: async (programId) => {
+        try {
+            const res = await apiFetch(`${API_BASE}/api/v2/programs/${programId}`, {
+                method: "DELETE",
+            });
+            if (!res.ok) {
+                const data = await res.json().catch(() => ({}));
+                throw new Error(data?.detail || "Failed to delete program");
+            }
+            // Optimistic remove from local state
+            set((state) => ({
+                programs: state.programs.filter((p) => p.id !== programId),
+            }));
+            return true;
+        } catch (e) {
+            console.error("Failed to delete program:", e);
+            useToastStore.getState().addToast((e as Error).message || "Failed to delete program", "error");
             return false;
         }
     },

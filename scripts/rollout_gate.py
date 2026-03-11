@@ -77,14 +77,30 @@ def main() -> int:
     gate_failed = False
 
     compile_targets = [
-        "cloud_sync_service.py",
+        # Core pipeline
+        "omega_manager.py",
         "omega_cloud_worker.py",
         "omega_db.py",
-        "omega_manager.py",
+        "config.py",
+        "profiles.py",
         "state_machine.py",
         "transition_service.py",
+        "event_handlers.py",
+        "delivery_actions.py",
+        "cloud_sync_service.py",
+        # API
+        "api_main.py",
+        "routers/health.py",
+        "routers/settings.py",
+        "routers/tracks.py",
+        "routers/ops.py",
+        "routers/editor.py",
+        "routers/programs.py",
+        "routers/auth.py",
+        # Workers
         "workers/finalizer/__init__.py",
         "workers/finalizer/main.py",
+        # Scripts
         "scripts/pipeline_audit.py",
         "scripts/failure_injection.py",
         "scripts/rollout_gate.py",

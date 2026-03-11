@@ -12,7 +12,7 @@ from sqlalchemy import select, text, func
 
 import config
 from db import get_db
-from models import Track, Program, ErrorLog
+from models import Track, Program, ErrorLog, StageTransition
 from routers import admin_required
 from transition_service import execute_transition
 
@@ -199,6 +199,11 @@ async def api_health(db: AsyncSession = Depends(get_db)):
         "errors_24h": {
             "count": errors_24h_count,
             "recent": recent_errors,
+        },
+        "station": {
+            "id": config.OMEGA_STATION_ID,
+            "name": getattr(config, "OMEGA_STATION_NAME", config.OMEGA_STATION_ID),
+            "ui_scope": getattr(config, "OMEGA_UI_SCOPE", "all"),
         },
         "config": {
             "db_type": db_type,
@@ -517,36 +522,89 @@ async def api_health_notify_dead(
 
 
 @router.get("/metrics")
+@router.get("/api/v2/metrics")
 async def metrics(db: AsyncSession = Depends(get_db)):
-    """Prometheus-compatible metrics."""
+    """Prometheus-compatible metrics endpoint."""
+    # --- Jobs by stage ---
     result = await db.execute(
         select(Track.stage, func.count(Track.id)).group_by(Track.stage)
     )
     stage_counts = {row[0]: row[1] for row in result.all()}
     total = sum(stage_counts.values())
 
+    # --- Manager heartbeat ---
     manager_age = _heartbeat_age_seconds("omega_manager")
+
+    # --- Storage ---
     storage_ready = 0
     try:
         storage_ready = 1 if config.critical_paths_ready(require_write=True) else 0
     except Exception:
         pass
 
+    # --- Disk space ---
+    disk_free = _disk_free_gb(config.DELIVERY_DIR)
+
+    # --- Errors (last 24h) ---
+    errors_24h = 0
+    try:
+        err_result = await db.execute(
+            select(func.count(ErrorLog.id)).where(
+                ErrorLog.created_at >= text("NOW() - INTERVAL '24 hours'")
+            )
+        )
+        errors_24h = err_result.scalar() or 0
+    except Exception:
+        pass
+
+    # --- Transition audit counts (last 24h) ---
+    transitions_24h = 0
+    try:
+        trans_result = await db.execute(
+            select(func.count(StageTransition.id)).where(
+                StageTransition.created_at >= text("NOW() - INTERVAL '24 hours'")
+            )
+        )
+        transitions_24h = trans_result.scalar() or 0
+    except Exception:
+        pass
+
+    # --- Build output ---
     lines = [
         "# HELP omega_storage_ready Storage paths ready/writable (1/0)",
         "# TYPE omega_storage_ready gauge",
         f"omega_storage_ready {storage_ready}",
+        "",
         "# HELP omega_jobs_total Total jobs in DB",
         "# TYPE omega_jobs_total gauge",
         f"omega_jobs_total {total}",
+        "",
         "# HELP omega_jobs_stage_total Jobs by stage",
         "# TYPE omega_jobs_stage_total gauge",
     ]
     for stage, count in sorted(stage_counts.items()):
         lines.append(f'omega_jobs_stage_total{{stage="{stage}"}} {count}')
+
+    lines.append("")
     if manager_age is not None:
         lines.append("# HELP omega_manager_heartbeat_age_seconds Seconds since manager heartbeat")
         lines.append("# TYPE omega_manager_heartbeat_age_seconds gauge")
         lines.append(f"omega_manager_heartbeat_age_seconds {manager_age:.3f}")
+        lines.append("")
+
+    if disk_free is not None:
+        lines.append("# HELP omega_disk_free_gb Free disk space in GB")
+        lines.append("# TYPE omega_disk_free_gb gauge")
+        lines.append(f"omega_disk_free_gb {disk_free:.1f}")
+        lines.append("")
+
+    lines.append("# HELP omega_errors_24h Errors logged in last 24 hours")
+    lines.append("# TYPE omega_errors_24h gauge")
+    lines.append(f"omega_errors_24h {errors_24h}")
+    lines.append("")
+
+    lines.append("# HELP omega_transitions_24h Stage transitions audited in last 24 hours")
+    lines.append("# TYPE omega_transitions_24h gauge")
+    lines.append(f"omega_transitions_24h {transitions_24h}")
 
     return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")

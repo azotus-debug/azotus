@@ -76,6 +76,9 @@ failure_counts = {}
 import threading
 _task_lock = threading.Lock()
 
+# Graceful shutdown event — set by signal handler, checked by main loop
+_shutdown_event = threading.Event()
+
 MAX_TASK_FAILURES = 3  # Reduced from 5 to limit runaway costs (was allowing 5 full restarts = 5x cost)
 
 # --- Thread-safe helpers for active_tasks ---
@@ -356,8 +359,8 @@ def _request_manager_restart(force: bool = False) -> None:
         RESTART_FLAG.touch()
         if force:
             RESTART_FORCE_FLAG.touch()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Failed to create restart flag: {e}")
 
 def _find_vault_video(stem: str) -> Optional[Path]:
     try:
@@ -468,8 +471,8 @@ def _trigger_review_portal(stem: str, meta: dict, job: dict) -> bool:
                 try:
                     report_data = json.loads(report) if isinstance(report, str) else report
                     quality_rating = report_data.get("rating")
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Failed to parse editor report for quality rating: {e}")
             
             # Send notification
             review_notifier.send_review_notification(
@@ -1489,8 +1492,8 @@ def _sync_cloud_approved_idempotent(stem: str, storage_client, bucket_name: str,
             # Simple check avoiding tz headaches if not strictly necessary
             if (datetime.now() - last_attempt).total_seconds() < backoff_seconds:
                 return False  # Too soon to retry
-        except Exception:
-            pass # If time parsing fails, verify anyway
+        except Exception as e:
+            logger.debug(f"Backoff time parsing failed, proceeding with sync: {e}")
 
     try:
         # Step 2: Download from GCS (if not already downloaded)
@@ -2105,8 +2108,8 @@ def process_jobs(executor):
                                         logger.info(f"⏳ Cloud job {stem} still active (GCS blob updated {blob_age:.0f}s ago). Skipping stall action.")
                                         gcs_still_active = True
                                         break
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logger.debug(f"GCS blob check failed for {stem} ({check_blob_name}): {e}")
                 except Exception as gcs_exc:
                     logger.debug(f"GCS progress check failed for {stem}: {gcs_exc}")
                 if gcs_still_active:
@@ -2142,8 +2145,8 @@ def process_jobs(executor):
                             logger.info(f"⏳ Cloud job for {stem} was triggered {(now - triggered_dt).total_seconds():.0f}s ago. Skipping re-trigger.")
                             omega_db.update_job_via_track(stem, meta={"soft_stall_at": ""})
                             continue
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"Failed to parse cloud_triggered_at for stall check on {stem}: {e}")
 
                 try:
                     apply_transition(
@@ -2426,8 +2429,8 @@ def process_jobs(executor):
                             triggered_dt = _parse_iso(cloud_triggered_at)
                             if triggered_dt and (datetime.now() - triggered_dt).total_seconds() < 300:
                                 recently_triggered = True
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug(f"Failed to parse cloud_triggered_at for {stem}: {e}")
                     needs_trigger = execution_value in (None, "", "unknown") and not recently_triggered
                     # GUARDRAIL: Cap total Cloud Run trigger attempts to prevent runaway cost
                     MAX_CLOUD_TRIGGERS = 3  # Max 3 full Cloud Run executions per job
@@ -2531,8 +2534,8 @@ def process_jobs(executor):
                                             "cloud_last_poll_at": datetime.now().isoformat(),
                                         },
                                     )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"Failed to update cloud progress for {stem}: {e}")
 
                     # IMPORTANT: If cloud_sync_service is enabled, skip manager's sync logic.
                     # Let the dedicated cloud_sync_service.py handle downloads to avoid race conditions.
@@ -2719,8 +2722,8 @@ def process_jobs(executor):
                 if sync_state_rec and sync_state_rec.get('state') in ('DOWNLOADING', 'DOWNLOADED'):
                     logger.debug(f"Skipping {stem}: cloud_sync is handling approved.json (state={sync_state_rec.get('state')})")
                     continue
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Sync state check failed for {stem}, proceeding: {e}")
 
             job = jobs_by_stem.get(stem) or omega_db.get_job_via_track(stem)
             if job:
@@ -2754,8 +2757,8 @@ def process_jobs(executor):
                         if sync_state_val and sync_state_val.get('state') != 'SYNCED':
                             omega_db.update_sync_state(stem, 'approved_json', 'SYNCED')
                             logger.info(f"🔄 Marked sync state SYNCED for {stem} (approved.json on disk)")
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"Failed to update sync state to SYNCED for {stem}: {e}")
                 if stage not in {"REVIEWED", "FINALIZING"}:
                     continue
 
@@ -2876,8 +2879,8 @@ def process_jobs(executor):
                             status_data = download_json(review_storage_client, bucket=bucket_name, blob_name=paths.review_status_json())
                             if status_data.get("status") == "approved":
                                 review_blob_name = paths.reviewed_json()  # Try to get segments from _REVIEWED.json
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.warning(f"Failed to download review status JSON for {stem}: {e}")
 
                     if review_blob_name and blob_exists(review_storage_client, bucket_name, review_blob_name):
                         try:
@@ -2960,8 +2963,8 @@ def process_jobs(executor):
                 done_srt = srt.parent / f"DONE_{srt.name}"
                 try:
                     shutil.move(str(srt), str(done_srt))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Failed to rename stale SRT {srt.name} to DONE_: {e}")
                 continue
 
             legacy_output = config.VIDEO_DIR / f"{stem}_SUBBED.mp4"
@@ -2989,8 +2992,8 @@ def process_jobs(executor):
                 done_srt = srt.parent / f"DONE_{srt.name}"
                 try:
                     shutil.move(str(srt), str(done_srt))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Failed to rename stale SRT {srt.name} to DONE_: {e}")
                 continue
 
             # Pre-Burn Gate
@@ -3360,8 +3363,8 @@ def _run_burn(srt, stem):
 import signal
 
 def cleanup(signum, frame):
-    logger.info(f"🛑 Received signal {signum}. Cleaning up...")
-    sys.exit(0)
+    logger.info(f"🛑 Received signal {signum}. Initiating graceful shutdown...")
+    _shutdown_event.set()
 
 def main():
     signal.signal(signal.SIGTERM, cleanup)
@@ -3401,7 +3404,7 @@ def main():
     db_failure_streak = 0
     circuit_open_until: Optional[float] = None
     with ThreadPoolExecutor(max_workers=22) as executor:
-        while True:
+        while not _shutdown_event.is_set():
             try:
                 system_health.update_heartbeat("omega_manager")
 
@@ -3420,19 +3423,24 @@ def main():
                 omega_db.cleanup_dead_stations(timeout_minutes=5)
 
                 if RESTART_FLAG.exists():
+                    if _shutdown_event.is_set():
+                        break  # Don't restart during shutdown
                     force = RESTART_FORCE_FLAG.exists()
-                    if active_tasks and not force:
-                        logger.warning(f"🔄 Restart requested; waiting for {len(active_tasks)} active tasks to finish...")
+                    with _task_lock:
+                        has_active = bool(active_tasks)
+                        active_count = len(active_tasks)
+                    if has_active and not force:
+                        logger.warning(f"🔄 Restart requested; waiting for {active_count} active tasks to finish...")
                         time.sleep(2)
                         continue
                     try:
                         RESTART_FLAG.unlink()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"Failed to remove restart flag: {e}")
                     try:
                         RESTART_FORCE_FLAG.unlink()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"Failed to remove force restart flag: {e}")
                     logger.warning("🔄 Restarting Omega Manager now%s...", " (forced)" if force else "")
                     os.execv(sys.executable, [sys.executable, str(Path(__file__).resolve())])
 
@@ -3467,8 +3475,20 @@ def main():
                         except Exception as e:
                             logger.error(f"Reconciliation check failed: {e}")
 
+                    # Purge stale failure_counts entries (>2h old, no active task)
+                    with _task_lock:
+                        stale_cutoff = time.time() - 7200
+                        stale_stems = [
+                            s for s, (c, t) in failure_counts.items()
+                            if t < stale_cutoff and s not in active_tasks
+                        ]
+                        for s in stale_stems:
+                            del failure_counts[s]
+                    if stale_stems:
+                        logger.debug(f"Cleaned {len(stale_stems)} stale failure_counts entries")
+
                     last_reconcile = now_ts
-                
+
                 # Reset circuit breaker on successful loop iteration
                 if db_failure_streak > 0:
                     db_failure_streak = 0
@@ -3501,6 +3521,30 @@ def main():
                 else:
                     db_failure_streak = 0
                 time.sleep(10)
+
+        # --- Graceful shutdown: executor drains here (context manager waits) ---
+        with _task_lock:
+            remaining = set(active_tasks)
+        if remaining:
+            logger.info(f"Waiting for {len(remaining)} active task(s) to finish: {remaining}")
+        else:
+            logger.info("No active tasks. Shutdown clean.")
+        # The `with ThreadPoolExecutor` context manager calls executor.shutdown(wait=True)
+        # which blocks until all submitted tasks are done.
+
+    # Mark any tasks that were still active as interrupted
+    with _task_lock:
+        still_active = set(active_tasks)
+    for stem in still_active:
+        try:
+            omega_db.update_job_via_track(
+                stem,
+                status="Interrupted: manager shutdown",
+                meta={"interrupted_at": datetime.now().isoformat()},
+            )
+        except Exception:
+            pass
+    logger.info("Graceful shutdown complete.")
 
 if __name__ == "__main__":
     try:

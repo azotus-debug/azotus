@@ -73,6 +73,195 @@ def _translate_with_timeout(engine, paragraph, target_lang, program_profile,
     return result_holder[0]
 
 
+def _run_correction_pass(
+    engine,
+    all_translated_segments: List[Dict],
+    translatable: List[Dict],
+    target_lang: str,
+    cache=None,
+    system_instruction: str = None,
+    transcript_context: str = None,
+    ideal_cps: int = 12,
+    hard_cps: int = 15,
+) -> float:
+    """
+    Pro Self-Correction Loop.
+
+    After v8 translation, run deterministic checks for CPS and budget violations.
+    If any exist, send ONE batched call back to Pro (using the same context cache)
+    asking it to rewrite ONLY the violating segments more concisely.
+
+    Returns elapsed time in seconds.
+    """
+    t_start = time.time()
+
+    # Build source lookup and budget lookup from original segments
+    source_map = {}
+    budget_map = {}
+    for seg in translatable:
+        sid = str(seg.get("id", ""))
+        source_map[sid] = seg.get("text", "")
+        # Compute budget from duration if not stored
+        duration = seg.get("end", 0) - seg.get("start", 0)
+        budget = seg.get("char_budget", min(int(max(duration, 0.5) * ideal_cps), 84))
+        budget_map[sid] = budget
+
+    # Find violations
+    violations = []
+    for seg in all_translated_segments:
+        sid = str(seg.get("id", ""))
+        text = seg.get("text", "")
+        budget = budget_map.get(sid, 84)
+        char_count = len(text)
+
+        # Check: total chars > budget × 1.2 (20% grace)?
+        over_budget = char_count > budget * 1.2
+
+        # Check: CPS > hard_cps?
+        # Find original segment timing
+        duration = 0
+        for orig in translatable:
+            if str(orig.get("id", "")) == sid:
+                duration = orig.get("end", 0) - orig.get("start", 0)
+                break
+        cps = char_count / max(duration, 0.3)
+        over_cps = cps > hard_cps
+
+        if over_budget or over_cps:
+            violations.append({
+                "id": sid,
+                "text": text,
+                "budget": budget,
+                "actual": char_count,
+                "cps": round(cps, 1),
+                "source": source_map.get(sid, ""),
+            })
+
+    if not violations:
+        logger.info("✅ Self-correction: 0 violations — no correction needed")
+        return time.time() - t_start
+
+    logger.info(
+        f"🔧 Self-correction: {len(violations)}/{len(all_translated_segments)} segments "
+        f"exceed budget or CPS limit — sending to Pro for rewrite"
+    )
+
+    # Build correction prompt
+    lang_config = profiles.LANGUAGES.get(target_lang, profiles.LANGUAGES["is"])
+    correction_prompt = f"""Some segments exceeded their character budget. Rewrite each one
+more concisely while preserving the speaker's emotion and meaning.
+
+Priority: remove filler → shorter synonyms → restructure sentence.
+Do NOT produce a flat literal translation just to save space.
+The result must sound like natural broadcast {lang_config['name']}.
+
+VIOLATIONS:
+{json.dumps(violations, ensure_ascii=False, indent=2)}
+
+Return JSON: {{"segments": [{{"id": "...", "text": "..."}}]}}"""
+
+    try:
+        from google import genai
+        from google.genai import types
+
+        shared_config = dict(
+            max_output_tokens=max(4096, len(violations) * 200),
+            response_mime_type="application/json",
+            response_schema={
+                "type": "OBJECT",
+                "properties": {
+                    "segments": {
+                        "type": "ARRAY",
+                        "items": {
+                            "type": "OBJECT",
+                            "properties": {
+                                "id": {"type": "STRING"},
+                                "text": {"type": "STRING"},
+                            },
+                            "required": ["id", "text"],
+                        },
+                    },
+                },
+                "required": ["segments"],
+            },
+            temperature=0.25,
+            safety_settings=[
+                types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+                types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
+                types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+                types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+            ],
+            thinking_config=types.ThinkingConfig(
+                thinking_budget=config.OMEGA_V8_THINKING_BUDGET,
+            ),
+        )
+
+        if cache:
+            response = engine.client.models.generate_content(
+                model=engine.model_name,
+                contents=correction_prompt,
+                config=types.GenerateContentConfig(
+                    cached_content=cache.name,
+                    **shared_config,
+                ),
+            )
+        else:
+            if not transcript_context:
+                logger.warning("⚠️ No cache or transcript for correction — skipping")
+                return time.time() - t_start
+            combined = f"{transcript_context}\n\n---\n\n{correction_prompt}"
+            response = engine.client.models.generate_content(
+                model=engine.model_name,
+                contents=combined,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_instruction or "",
+                    **shared_config,
+                ),
+            )
+
+        response_text = response.text
+        result = json.loads(response_text)
+        corrected = result.get("segments", [])
+
+        # Merge corrections back
+        correction_map = {str(s["id"]): s["text"] for s in corrected if s.get("id") and s.get("text")}
+        changes = 0
+        still_over = 0
+        for seg in all_translated_segments:
+            sid = str(seg.get("id", ""))
+            if sid in correction_map:
+                new_text = correction_map[sid]
+                if new_text != seg.get("text"):
+                    changes += 1
+                    # Check if correction is actually better (shorter)
+                    if len(new_text) <= len(seg.get("text", "")):
+                        seg["text"] = new_text
+                    else:
+                        # Correction is longer — keep original, it's probably fine
+                        logger.debug(f"   Correction for {sid} is longer ({len(new_text)} > {len(seg['text'])}), keeping original")
+                        still_over += 1
+
+        elapsed = time.time() - t_start
+        logger.info(
+            f"🔧 Self-correction done: {changes} segments rewritten, "
+            f"{still_over} kept original (correction was longer), "
+            f"{elapsed:.1f}s"
+        )
+
+        # Log token usage
+        usage = getattr(response, 'usage_metadata', None)
+        if usage:
+            total_tokens = getattr(usage, 'total_token_count', 'N/A')
+            cached_tokens = getattr(usage, 'cached_content_token_count', 0)
+            logger.info(f"   📊 Correction tokens: {total_tokens} (cached: {cached_tokens})")
+
+        return elapsed
+
+    except Exception as e:
+        logger.error(f"❌ Self-correction API call failed: {e}")
+        raise
+
+
 def _run_v8_translation(
     engine, paragraphs, pre_segmented, target_lang, program_profile,
     extra_terms, entity_anchors, speaker_genders, effective_brief,
@@ -165,13 +354,8 @@ def _run_v8_translation(
     )
     logger.info(f"   Transcript context: {len(transcript_context)} chars (~{len(transcript_context) // 4} tokens)")
 
-    # Get system instruction — creative prompt if Flash QA is enabled
-    use_flash_qa = config.OMEGA_FLASH_QA_ENABLED
-    if use_flash_qa:
-        system_instruction = profiles.get_creative_system_instruction(target_lang, program_profile, extra_terms=extra_terms)
-        logger.info("🎨 Two-pass mode: Using CREATIVE prompt (Flash QA will handle mechanics)")
-    else:
-        system_instruction = profiles.get_system_instruction(target_lang, program_profile, extra_terms=extra_terms)
+    # Get system instruction — budget-aware broadcast prompt (Flash QA removed)
+    system_instruction = profiles.get_system_instruction(target_lang, program_profile, extra_terms=extra_terms)
 
     # Create context cache
     logger.info("📦 Creating context cache...")
@@ -208,7 +392,6 @@ def _run_v8_translation(
                     transcript_context=transcript_context if not cache else None,
                     continuity_payload=continuity,
                     glossary_terms=active_glossary if active_glossary else None,
-                    creative_mode=use_flash_qa,
                 )
             except Exception as e:
                 logger.warning(f"   ⚠️ Chunk {idx+1}/{total_chunks} attempt {attempt+1}/{max_retries}: {e}")
@@ -293,9 +476,6 @@ def _run_v8_translation(
     translate_elapsed = time.time() - t_translate
     total_elapsed = cache_elapsed + translate_elapsed
 
-    # Cleanup cache
-    engine.delete_context_cache(cache)
-
     # Reassemble in chunk order
     all_translated_segments = []
     for i in range(total_chunks):
@@ -311,56 +491,34 @@ def _run_v8_translation(
     )
 
     # ═══════════════════════════════════════════════════════════════
-    # PASS 2: Flash QA (if enabled)
-    # Pro did the creative translation. Now Flash enforces mechanical constraints.
+    # PASS 2: Pro Self-Correction (replaces Flash QA)
+    # Deterministic check for CPS/budget violations, then ONE batched
+    # call back to Pro (same context cache) for rewrites.
+    # Cache is STILL ALIVE here — correction reuses it for 90% discount.
     # ═══════════════════════════════════════════════════════════════
-    if use_flash_qa:
-        logger.info(f"🔍 PASS 2: Running Flash QA on {len(all_translated_segments)} segments...")
-        t_qa = time.time()
+    correction_elapsed = 0
+    try:
+        correction_elapsed = _run_correction_pass(
+            engine=engine,
+            all_translated_segments=all_translated_segments,
+            translatable=translatable,
+            target_lang=target_lang,
+            cache=cache,
+            system_instruction=system_instruction,
+            transcript_context=transcript_context,
+            ideal_cps=12 if target_lang.lower() == "is" else 15,
+            hard_cps=15 if target_lang.lower() == "is" else 17,
+        )
+        total_elapsed += correction_elapsed
+    except Exception as corr_err:
+        logger.error(f"❌ Self-correction pass failed: {corr_err}")
+        logger.warning("⚠️ Proceeding with original Pro translations (self-correction failed)")
 
-        # Build source_text mapping so Flash can see English alongside Icelandic
-        source_map = {}
-        for seg in translatable:
-            source_map[str(seg.get("id"))] = seg.get("text", "")
-
-        # Ensure each translated segment has source_text for Flash
-        for seg in all_translated_segments:
-            seg_id = str(seg.get("id", ""))
-            if "source_text" not in seg and seg_id in source_map:
-                seg["source_text"] = source_map[seg_id]
-
-        try:
-            qa_results = engine.flash_qa_pass(
-                translated_segments=all_translated_segments,
-                target_lang=target_lang,
-                glossary_terms=active_glossary if active_glossary else None,
-                flash_model=config.MODEL_FLASH_QA,
-            )
-
-            # Merge QA results back — Flash returns {id, text}, update the translated segments
-            qa_map = {str(r["id"]): r["text"] for r in qa_results}
-            qa_changes = 0
-            for seg in all_translated_segments:
-                seg_id = str(seg.get("id", ""))
-                if seg_id in qa_map:
-                    new_text = qa_map[seg_id]
-                    if new_text != seg.get("text"):
-                        qa_changes += 1
-                    seg["text"] = new_text
-
-            qa_elapsed = time.time() - t_qa
-            logger.info(
-                f"🔍 Flash QA complete: {qa_changes}/{len(all_translated_segments)} segments modified "
-                f"in {qa_elapsed:.1f}s"
-            )
-            total_elapsed += qa_elapsed
-
-        except Exception as qa_err:
-            logger.error(f"❌ Flash QA pass failed: {qa_err}")
-            logger.warning("⚠️ Proceeding with unpolished Pro translations (Flash QA failed)")
+    # Cleanup cache AFTER correction pass has used it
+    engine.delete_context_cache(cache)
 
     logger.info(
-        f"⚡ {'v9 TWO-PASS' if use_flash_qa else 'v8'} COMPLETE: "
+        f"⚡ v8 COMPLETE: "
         f"{len(all_translated_segments)} segments in {total_elapsed:.1f}s"
     )
 

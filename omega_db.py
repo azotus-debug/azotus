@@ -102,7 +102,7 @@ def ensure_schema():
             conn.close()
             _SCHEMA_READY = True
         except Exception as e:
-            print(f"⚠️ Schema migration skipped: {e}")
+            logger.warning(f"Schema migration skipped: {e}")
 
 
 
@@ -589,6 +589,23 @@ def init_pg_schema(conn):
     c.execute('CREATE INDEX IF NOT EXISTS idx_error_log_job_id ON error_log(job_id)')
     c.execute('CREATE INDEX IF NOT EXISTS idx_error_log_created_at ON error_log(created_at)')
 
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS cloud_sync_state (
+            id TEXT NOT NULL,
+            artifact_type TEXT NOT NULL,
+            artifact_path TEXT,
+            local_path TEXT,
+            state TEXT DEFAULT 'PENDING',
+            error_message TEXT,
+            attempt_count INTEGER DEFAULT 0,
+            last_attempt_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (id, artifact_type)
+        )
+    ''')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_cloud_sync_state_state ON cloud_sync_state(state)')
+
     # =========================================================================
     # ADD MISSING COLUMNS (PostgreSQL schema drift fixes)
     # Legacy columns that may be missing in older deployments.
@@ -1051,9 +1068,9 @@ def get_all_jobs(stage: str = None):
 
 def delete_job(file_stem):
     """Deep delete a job, including programs, tracks, and files on disk."""
-    print(f"DEBUG: delete_job START for '{file_stem}'")
+    logger.debug(f"delete_job START for '{file_stem}'")
     if not file_stem or len(file_stem) < 2:
-        print("DEBUG: file_stem too short")
+        logger.debug("file_stem too short")
         return
 
     # 1. Database Cleanup
@@ -1063,17 +1080,17 @@ def delete_job(file_stem):
 
         # Legacy Jobs
         c.execute("DELETE FROM jobs WHERE file_stem=?", (file_stem,))
-        print(f"DEBUG: {c.rowcount} legacy jobs deleted")
+        logger.debug(f"{c.rowcount} legacy jobs deleted")
 
         # Modern Programs & Tracks
         # Find programs that match this file_stem (could be title, filename, or UUID)
-        print(f"DEBUG: Searching programs for title='{file_stem}' or matches")
+        logger.debug(f"Searching programs for title='{file_stem}' or matches")
         c.execute(
             "SELECT id, title FROM programs WHERE id=? OR title=? OR original_filename LIKE ?",
             (file_stem, file_stem, f"{file_stem}%")
         )
         program_rows = c.fetchall()
-        print(f"DEBUG: Found {len(program_rows)} programs to delete")
+        logger.debug(f"Found {len(program_rows)} programs to delete")
 
         for row in program_rows:
             try:
@@ -1107,18 +1124,18 @@ def delete_job(file_stem):
                 try:
                     c.execute("DELETE FROM master_scripts WHERE program_id=?", (p_id,))
                 except Exception as e:
-                    print(f"Warning: Failed to delete master_scripts for program {p_id}: {e}")
+                    logger.warning(f"Failed to delete master_scripts for program {p_id}: {e}")
 
                 # Delete programs
                 c.execute("DELETE FROM programs WHERE id=?", (p_id,))
 
             except Exception as e:
-                print(f"Error checking program deletion for row {row}: {e}")
+                logger.error(f"Error checking program deletion for row {row}: {e}")
             
         conn.commit()
-        print(f"Deep delete successful for '{file_stem}'.")
+        logger.info(f"Deep delete successful for '{file_stem}'.")
     except Exception as e:
-        print(f"Deep delete failed for '{file_stem}': {e}")
+        logger.error(f"Deep delete failed for '{file_stem}': {e}")
         # Don't re-raise, allow file cleanup to attempt to proceed
     finally:
         if conn: conn.close()
@@ -1153,7 +1170,7 @@ def _delete_files_from_disk(stem):
                         f.unlink()
                         count += 1
                     except Exception as e:
-                        print(f"Warning: Failed to delete file {f}: {e}")
+                        logger.warning(f"Failed to delete file {f}: {e}")
                 elif f.is_dir():
                     # Optional: Remove dir if it matches stem EXACTLY (like a job folder)
                     if f.name == stem:
@@ -1161,7 +1178,7 @@ def _delete_files_from_disk(stem):
                         shutil.rmtree(f, ignore_errors=True)
                         count += 1
         except Exception as e:
-            print(f"Warning: Error during cleanup in {search_dir}: {e}")
+            logger.warning(f"Error during cleanup in {search_dir}: {e}")
     # print(f"Deleted {count} files for {stem}")
 
 
@@ -2421,7 +2438,7 @@ def station_heartbeat(station_id: str, status: str = "online") -> bool:
     
     try:
         c.execute(
-            "UPDATE stations SET last_heartbeat=?, status=?, updated_at=? WHERE id=?",
+            "UPDATE stations SET last_heartbeat=%s, status=%s, updated_at=%s WHERE id=%s",
             (now, status, now, station_id)
         )
         conn.commit()
@@ -2437,7 +2454,7 @@ def get_station(station_id: str) -> dict:
     """Get station details by ID."""
     conn = _connect()
     c = conn.cursor()
-    c.execute("SELECT * FROM stations WHERE id=?", (station_id,))
+    c.execute("SELECT * FROM stations WHERE id=%s", (station_id,))
     row = c.fetchone()
     conn.close()
     
@@ -2485,26 +2502,26 @@ def cleanup_dead_stations(timeout_minutes: int = 5) -> int:
     
     try:
         # Find dead stations
-        c.execute("SELECT id FROM stations WHERE last_heartbeat < ?", (cutoff,))
+        c.execute("SELECT id FROM stations WHERE last_heartbeat < %s", (cutoff,))
         rows = c.fetchall()
         dead_stations = [row[0] if isinstance(row, tuple) else row['id'] for row in rows]
-        
+
         released_count = 0
         if dead_stations:
             # Release their jobs
-            placeholders = ','.join(['?'] * len(dead_stations))
+            placeholders = ','.join(['%s'] * len(dead_stations))
             c.execute(f'''
-                UPDATE jobs 
+                UPDATE jobs
                 SET station_id = NULL, status = 'Released (Station Offline)', claimed_at = NULL
                 WHERE station_id IN ({placeholders})
                 AND (stage != 'COMPLETED')
             ''', dead_stations)
             released_count = c.rowcount
-            
+
             # Mark stations as offline
             c.execute(f'''
-                UPDATE stations 
-                SET status = 'offline' 
+                UPDATE stations
+                SET status = 'offline'
                 WHERE id IN ({placeholders})
             ''', dead_stations)
             
@@ -2582,21 +2599,21 @@ def release_job(file_stem: str, error: str = None) -> bool:
     try:
         if error:
             c.execute('''
-                UPDATE jobs SET 
+                UPDATE jobs SET
                     station_id = NULL,
                     claimed_at = NULL,
-                    status = ?,
-                    updated_at = ?
-                WHERE file_stem = ?
+                    status = %s,
+                    updated_at = %s
+                WHERE file_stem = %s
             ''', (f"Released: {error[:100]}", now, file_stem))
         else:
             c.execute('''
-                UPDATE jobs SET 
+                UPDATE jobs SET
                     station_id = NULL,
                     claimed_at = NULL,
                     status = 'Released - awaiting retry',
-                    updated_at = ?
-                WHERE file_stem = ?
+                    updated_at = %s
+                WHERE file_stem = %s
             ''', (now, file_stem))
         
         conn.commit()
@@ -2620,20 +2637,20 @@ def complete_station_job(file_stem: str, station_id: str, delivery_path: str = N
     try:
         # Update job
         c.execute('''
-            UPDATE jobs SET 
+            UPDATE jobs SET
                 stage = 'DELIVERED',
                 status = 'Delivered',
                 progress = 100.0,
-                updated_at = ?
-            WHERE file_stem = ? AND station_id = ?
+                updated_at = %s
+            WHERE file_stem = %s AND station_id = %s
         ''', (now, file_stem, station_id))
-        
+
         # Increment station counter
         c.execute('''
-            UPDATE stations SET 
+            UPDATE stations SET
                 jobs_processed = jobs_processed + 1,
-                updated_at = ?
-            WHERE id = ?
+                updated_at = %s
+            WHERE id = %s
         ''', (now, station_id))
         
         conn.commit()

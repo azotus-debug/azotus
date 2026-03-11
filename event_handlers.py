@@ -41,6 +41,8 @@ from functools import wraps
 from queue import Queue, Empty
 from typing import Any, Callable, Dict, List, Optional, Set
 
+from transition_service import apply_transition
+
 logger = logging.getLogger(__name__)
 
 # =============================================================================
@@ -147,10 +149,14 @@ def enqueue_transcription(job_id: str, event: Dict[str, Any]) -> None:
     """Enqueue a job for transcription."""
     logger.info(f"[{job_id}] Enqueuing for transcription")
     try:
-        import omega_db
-        omega_db.update_job_via_track(
-            job_id,
-            stage="INGEST",
+        from_stage = event.get("data", {}).get("from_stage", "QUEUED")
+        apply_transition(
+            job_id=job_id,
+            job_stem=job_id,
+            from_stage=from_stage,
+            to_stage="INGEST",
+            worker_id="event_handler",
+            skip_validation=True,
             status="Starting transcription",
             progress=15.0,
         )
@@ -175,9 +181,14 @@ def submit_cloud_translation(job_id: str, event: Dict[str, Any]) -> None:
         if isinstance(meta, str):
             meta = json.loads(meta)
 
-        omega_db.update_job_via_track(
-            job_id,
-            stage="TRANSLATING_CLOUD_SUBMITTED",
+        from_stage = event.get("data", {}).get("from_stage", "TRANSCRIBED")
+        apply_transition(
+            job_id=job_id,
+            job_stem=job_id,
+            from_stage=from_stage,
+            to_stage="TRANSLATING_CLOUD_SUBMITTED",
+            worker_id="event_handler",
+            skip_validation=True,
             status="Submitted to cloud worker",
             progress=35.0,
         )
@@ -189,10 +200,14 @@ def enqueue_burn(job_id: str, event: Dict[str, Any]) -> None:
     """Enqueue a job for video burning."""
     logger.info(f"[{job_id}] Enqueuing for burn")
     try:
-        import omega_db
-        omega_db.update_job_via_track(
-            job_id,
-            stage="BURNING",
+        from_stage = event.get("data", {}).get("from_stage", "FINALIZED")
+        apply_transition(
+            job_id=job_id,
+            job_stem=job_id,
+            from_stage=from_stage,
+            to_stage="BURNING",
+            worker_id="event_handler",
+            skip_validation=True,
             status="Starting video burn",
             progress=90.0,
             meta={"burn_started_at": datetime.now().isoformat()},
@@ -205,10 +220,14 @@ def enqueue_finalization(job_id: str, event: Dict[str, Any]) -> None:
     """Enqueue a job for finalization (SRT/ASS generation)."""
     logger.info(f"[{job_id}] Enqueuing for finalization")
     try:
-        import omega_db
-        omega_db.update_job_via_track(
-            job_id,
-            stage="FINALIZING",
+        from_stage = event.get("data", {}).get("from_stage", "REVIEWED")
+        apply_transition(
+            job_id=job_id,
+            job_stem=job_id,
+            from_stage=from_stage,
+            to_stage="FINALIZING",
+            worker_id="event_handler",
+            skip_validation=True,
             status="Generating subtitles",
             progress=75.0,
         )
@@ -490,9 +509,15 @@ def on_review_submitted(event: Dict[str, Any]) -> None:
 
     try:
         import omega_db
-        omega_db.update_job_via_track(
-            job_id,
-            stage="REVIEWED",
+        job = omega_db.get_job_via_track(job_id)
+        current_stage = job.get("stage", "REVIEWING") if job else "REVIEWING"
+        apply_transition(
+            job_id=job_id,
+            job_stem=job_id,
+            from_stage=current_stage,
+            to_stage="REVIEWED",
+            worker_id="event_handler",
+            skip_validation=True,
             status=f"Review complete ({corrections_count} corrections)",
             progress=72.0,
             meta={

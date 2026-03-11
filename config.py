@@ -349,6 +349,9 @@ OMEGA_CLOUD_DEADMAN_MINUTES = int(os.environ.get("OMEGA_CLOUD_DEADMAN_MINUTES", 
 _raw_station = os.environ.get("OMEGA_STATION_ID", "") or socket.gethostname()
 OMEGA_STATION_ID = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(_raw_station).strip()).strip("-").lower() or "station"
 
+# Human-friendly name for this station (shown in dashboard, health endpoint).
+OMEGA_STATION_NAME = os.environ.get("OMEGA_STATION_NAME", "").strip() or OMEGA_STATION_ID
+
 # When true, this station will claim/process jobs that have no station_id assigned.
 # Keep False for multi-station safety; set True temporarily to recover legacy jobs.
 OMEGA_STATION_CLAIM_UNASSIGNED = os.environ.get("OMEGA_STATION_CLAIM_UNASSIGNED", "0").strip().lower() in {"1", "true", "yes", "on"}
@@ -656,6 +659,53 @@ OMEGA_STALL_TIMEOUTS = {
     "REVIEWING": 172800.0,      # 48 hours for human review
 }
 
+# --- AUTHENTICATION ---
+OMEGA_JWT_SECRET = os.environ.get("OMEGA_JWT_SECRET", "").strip()
+if not OMEGA_JWT_SECRET:
+    # Auto-generate a stable secret from the admin token (so restarts don't invalidate tokens)
+    _admin_token = os.environ.get("OMEGA_ADMIN_TOKEN", "").strip()
+    if _admin_token:
+        import hashlib
+        OMEGA_JWT_SECRET = hashlib.sha256(f"omega-jwt-{_admin_token}".encode()).hexdigest()
+    else:
+        import secrets as _secrets
+        OMEGA_JWT_SECRET = _secrets.token_hex(32)
+        logger.warning("CONFIG: No OMEGA_JWT_SECRET or OMEGA_ADMIN_TOKEN set. JWT secret is ephemeral (tokens won't survive restart).")
+
+OMEGA_JWT_EXPIRY_HOURS = int(os.environ.get("OMEGA_JWT_EXPIRY_HOURS", "168"))  # 7 days
+OMEGA_JWT_REVIEW_EXPIRY_HOURS = int(os.environ.get("OMEGA_JWT_REVIEW_EXPIRY_HOURS", "72"))
+OMEGA_USERS_FILE = os.environ.get("OMEGA_USERS_FILE", str(BASE_DIR / ".omega_users.json"))
+
 # --- ZERO-TOUCH PIPELINE ---
 # If True, bypasses manual "Burn Approval" gate for jobs with review_required=True
 OMEGA_ALLOW_AUTO_BURN = os.environ.get("OMEGA_ALLOW_AUTO_BURN", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+# --- CONFIG VALIDATION ---
+def validate_config():
+    """Validate critical numeric config values at startup. Warns on bad values, never crashes."""
+    _warnings = []
+
+    def _check(name, value, lo, hi):
+        if value < lo or value > hi:
+            _warnings.append(f"{name}={value} outside safe range [{lo}, {hi}]")
+
+    _check("OMEGA_V8_CHUNK_SIZE", OMEGA_V8_CHUNK_SIZE, 10, 500)
+    _check("OMEGA_V8_CHUNK_WAVE_SIZE", OMEGA_V8_CHUNK_WAVE_SIZE, 1, 10)
+    _check("OMEGA_V8_CACHE_TTL", OMEGA_V8_CACHE_TTL, 60, 86400)
+    _check("OMEGA_V8_THINKING_BUDGET", OMEGA_V8_THINKING_BUDGET, 1024, 65536)
+    _check("OMEGA_WORSHIP_REPETITION_WINDOW", OMEGA_WORSHIP_REPETITION_WINDOW, 10, 500)
+    _check("OMEGA_WORSHIP_REPETITION_THRESHOLD", OMEGA_WORSHIP_REPETITION_THRESHOLD, 2, 20)
+    _check("OMEGA_WORSHIP_MIN_CLUSTER_SIZE", OMEGA_WORSHIP_MIN_CLUSTER_SIZE, 2, 100)
+    _check("OMEGA_CLOUD_TRANSLATE_MAX_ATTEMPTS", OMEGA_CLOUD_TRANSLATE_MAX_ATTEMPTS, 1, 20)
+    _check("OMEGA_CLOUD_TRANSLATE_CHUNK_SIZE", OMEGA_CLOUD_TRANSLATE_CHUNK_SIZE, 10, 500)
+    _check("ELEVENLABS_MAX_SPEAKERS", ELEVENLABS_MAX_SPEAKERS, 1, 100)
+    _check("OMEGA_CLOUD_SYNC_POLL_SECONDS", OMEGA_CLOUD_SYNC_POLL_SECONDS, 5, 600)
+
+    for w in _warnings:
+        logger.warning("CONFIG VALIDATION: %s", w)
+
+    return len(_warnings) == 0
+
+
+validate_config()

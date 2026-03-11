@@ -252,6 +252,11 @@ PROFILES = {
             "Throne": {"is": "Hásæti", "es": "Trono", "nl": "Troon"},
             "Lamb of God": {"is": "Guðs Lamb", "es": "Cordero de Dios", "nl": "Lam van God"},
             "Almighty": {"is": "Almáttugur", "es": "Todopoderoso", "nl": "Almachtige"},
+            # Geopolitical terms
+            "Islamic Republic": {"is": "Íslamska lýðveldið", "es": "República Islámica", "nl": "Islamitische Republiek"},
+            "Hezbollah": {"is": "Hizbollah", "es": "Hezbolá", "nl": "Hezbollah"},
+            "Hamas": {"is": "Hamas", "es": "Hamás", "nl": "Hamas"},
+            "IDF": {"is": "Ísraelsher", "es": "FDI", "nl": "IDF"},
         }
     },
     "in_touch": {
@@ -439,7 +444,9 @@ RULE 1: CHARACTER LIMITS
 RULE 2: CPS (Characters Per Second)
 - Each segment has a duration and max_chars budget.
 - Translation text length MUST be ≤ max_chars for that segment.
-- If over budget: cut fillers first, then non-essential adjectives. NEVER cut theological meaning.
+- If over budget, you MUST summarize and condense the meaning rather than doing a literal translation.
+- Priority for cutting: fillers -> non-essential adjectives -> restructure sentence.
+- NEVER cut core theological meaning. Prioritize reading speed over literal word-for-word accuracy when under tight timing constraints.
 
 RULE 3: LINE BREAKS
 - If a subtitle needs 2 lines, break at a natural clause boundary.
