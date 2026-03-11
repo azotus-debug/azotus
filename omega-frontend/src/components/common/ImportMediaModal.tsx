@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useCallback } from "react";
-import { Upload, X, Film, FileText, Loader2, Check, Zap, ShieldAlert } from "lucide-react";
+import { Upload, X, Film, FileText, Loader2, Check, Zap, ShieldAlert, Languages, Flame } from "lucide-react";
 import { getStoredToken, getBackendDirectUrl } from "@/lib/api";
 const VIDEO_EXTENSIONS = /\.(mp4|mov|mkv|avi|webm|m4v|wmv|flv|mts|m2ts|ts|mxf|prores)$/i;
 
@@ -41,6 +41,10 @@ export default function ImportMediaModal({ isOpen, onClose, onSuccess }: ImportM
   const fileInputRef = useRef<HTMLInputElement>(null);
   const srtInputRef = useRef<HTMLInputElement>(null);
 
+  // "translate" = English SRT → translate to target language
+  // "burn" = Already-translated SRT → burn directly onto video
+  const [srtMode, setSrtMode] = useState<"translate" | "burn">("burn");
+
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     const files = Array.from(e.dataTransfer.files);
@@ -63,7 +67,7 @@ export default function ImportMediaModal({ isOpen, onClose, onSuccess }: ImportM
     const file = e.target.files?.[0];
     if (file) {
       setSrtFile(file);
-      setPipelineMode("quick_burn");
+      setPipelineMode(srtMode === "translate" ? "skip_transcription" : "quick_burn");
     }
   };
 
@@ -133,6 +137,7 @@ export default function ImportMediaModal({ isOpen, onClose, onSuccess }: ImportM
         // Reset state
         setSelectedFile(null);
         setSrtFile(null);
+        setSrtMode("burn");
         setSelectedLanguages(["is"]);
         setPipelineMode("full_pipeline");
         setReviewMode("automatic");
@@ -203,13 +208,14 @@ export default function ImportMediaModal({ isOpen, onClose, onSuccess }: ImportM
                 onChange={() => {
                   if (srtFile) {
                     setSrtFile(null);
+                    setSrtMode("burn");
                     setPipelineMode("full_pipeline");
                   } else {
                     srtInputRef.current?.click();
                   }
                 }}
               />
-              I have an existing SRT file (skip transcription & translation)
+              I have an existing SRT file
             </label>
             <input
               ref={srtInputRef}
@@ -219,15 +225,55 @@ export default function ImportMediaModal({ isOpen, onClose, onSuccess }: ImportM
               style={{ display: "none" }}
             />
             {srtFile && (
-              <div className="srt-file">
-                <FileText size={16} />
-                <span>{srtFile.name}</span>
-              </div>
+              <>
+                <div className="srt-file">
+                  <FileText size={16} />
+                  <span>{srtFile.name}</span>
+                </div>
+                <div className="srt-mode-options">
+                  <label className={`srt-mode-option ${srtMode === "translate" ? "selected" : ""}`}>
+                    <input
+                      type="radio"
+                      name="srtMode"
+                      value="translate"
+                      checked={srtMode === "translate"}
+                      onChange={() => {
+                        setSrtMode("translate");
+                        setPipelineMode("skip_transcription");
+                      }}
+                      style={{ position: "absolute", opacity: 0 }}
+                    />
+                    <Languages size={18} />
+                    <div className="srt-mode-content">
+                      <span className="srt-mode-title">Translate SRT</span>
+                      <span className="srt-mode-desc">English SRT — translate to target language, then burn</span>
+                    </div>
+                  </label>
+                  <label className={`srt-mode-option ${srtMode === "burn" ? "selected" : ""}`}>
+                    <input
+                      type="radio"
+                      name="srtMode"
+                      value="burn"
+                      checked={srtMode === "burn"}
+                      onChange={() => {
+                        setSrtMode("burn");
+                        setPipelineMode("quick_burn");
+                      }}
+                      style={{ position: "absolute", opacity: 0 }}
+                    />
+                    <Flame size={18} />
+                    <div className="srt-mode-content">
+                      <span className="srt-mode-title">Burn as-is</span>
+                      <span className="srt-mode-desc">Already translated — burn directly onto video</span>
+                    </div>
+                  </label>
+                </div>
+              </>
             )}
           </div>
 
           {/* Pipeline Strategy */}
-          {!srtFile && (
+          {(!srtFile || srtMode === "translate") && (
             <div className="section" style={{ marginTop: "16px" }}>
               <h3>Pipeline Strategy</h3>
               <div className="mode-options" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", flexDirection: "row" }}>
@@ -274,7 +320,7 @@ export default function ImportMediaModal({ isOpen, onClose, onSuccess }: ImportM
           )}
 
           {/* Language Selection */}
-          {!srtFile && (
+          {(!srtFile || srtMode === "translate") && (
             <div className="section" style={{ marginTop: "32px" }}>
               <h3>Target Languages</h3>
               <div className="language-grid">
@@ -480,6 +526,59 @@ export default function ImportMediaModal({ isOpen, onClose, onSuccess }: ImportM
             background: rgba(59, 130, 246, 0.1);
             border-radius: 4px;
             font-size: 13px;
+            color: rgb(var(--omega-blue));
+          }
+
+          .srt-mode-options {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            margin-top: 10px;
+          }
+
+          .srt-mode-option {
+            position: relative;
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            padding: 12px;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.2s;
+            color: rgb(var(--omega-text-3));
+          }
+
+          .srt-mode-option:hover {
+            background: rgba(255, 255, 255, 0.05);
+          }
+
+          .srt-mode-option.selected {
+            background: rgba(59, 130, 246, 0.1);
+            border-color: rgb(var(--omega-blue));
+            color: rgb(var(--omega-blue));
+          }
+
+          .srt-mode-content {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+          }
+
+          .srt-mode-title {
+            font-size: 13px;
+            font-weight: 500;
+            color: rgb(var(--omega-text-1));
+          }
+
+          .srt-mode-desc {
+            font-size: 11px;
+            color: rgb(var(--omega-text-3));
+            line-height: 1.3;
+          }
+
+          .srt-mode-option.selected .srt-mode-title {
             color: rgb(var(--omega-blue));
           }
 

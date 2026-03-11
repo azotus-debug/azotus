@@ -32,6 +32,61 @@ def _secure_filename(filename: str) -> str:
 _BOUNDARY_RE = re.compile(r'boundary=(?:"([^"]+)"|([^;]+))', re.IGNORECASE)
 
 
+def _srt_timecode_to_seconds(tc: str) -> float:
+    """Convert SRT timecode HH:MM:SS,mmm to float seconds."""
+    tc = tc.replace(",", ".")
+    parts = tc.split(":")
+    return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+
+
+def _parse_srt_to_skeleton(srt_content: str, source_filename: str) -> dict:
+    """
+    Parse SRT content into skeleton JSON format for the translation pipeline.
+    The skeleton is what the v8 cloud translator expects as input.
+    """
+    segments = []
+    blocks = srt_content.strip().split("\n\n")
+
+    for block in blocks:
+        lines = block.strip().split("\n")
+        if len(lines) < 3:
+            continue
+        try:
+            seg_id = int(lines[0].strip())
+        except ValueError:
+            continue
+        if "-->" not in lines[1]:
+            continue
+
+        tc_parts = lines[1].split("-->")
+        start = _srt_timecode_to_seconds(tc_parts[0].strip())
+        end = _srt_timecode_to_seconds(tc_parts[1].strip())
+        text = "\n".join(lines[2:])
+
+        segments.append({
+            "id": seg_id,
+            "start": round(start, 3),
+            "end": round(end, 3),
+            "text": text,
+            "is_audio_event": False,
+            "audio_event_type": None,
+            "is_music": False,
+            "preserve_in_subtitle": True,
+        })
+
+    return {
+        "file": source_filename,
+        "transcriber": "srt_import",
+        "language_code": "en",
+        "segments": segments,
+        "metadata": {
+            "source": "srt_upload",
+            "original_srt": source_filename,
+            "segment_count": len(segments),
+        },
+    }
+
+
 class _MemoryUpload:
     def __init__(self, filename: str, data: bytes):
         self.filename = filename
@@ -339,11 +394,27 @@ async def upload_program_media(
             transcript_dest = vault_dir / transcript_name
             await _save_upload(transcript_file, transcript_dest)
 
+        # If an English SRT was provided, parse it into skeleton JSON for translation
+        if srt_file:
+            srt_bytes = await srt_file.read()
+            srt_content = srt_bytes.decode("utf-8", errors="replace")
+            skeleton = _parse_srt_to_skeleton(srt_content, video_name)
+            config.VAULT_DATA.mkdir(parents=True, exist_ok=True)
+            skeleton_path = config.VAULT_DATA / f"{stem}_SKELETON.json"
+            skeleton_path.write_text(
+                json.dumps(skeleton, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            logger.info(
+                "skip_transcription: SRT → skeleton with %d segments → %s",
+                len(skeleton["segments"]), skeleton_path,
+            )
+
+        status_msg = "SRT imported for translation" if srt_file else "Skipped transcription"
         await asyncio.to_thread(
             omega_db.update_job_via_track,
             stem,
             stage="TRANSCRIBED",
-            status="Skipped transcription",
+            status=status_msg,
             progress=30.0,
             subtitle_style="RUV_BOX",
             meta={
